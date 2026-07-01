@@ -1,0 +1,1091 @@
+---
+title: 'PIHNA 1D'
+format:
+    html: 
+        code-fold: true
+        lightbox: true
+        code-tools: true
+        code-overflow: wrap
+---
+
+```{python}
+#| label: importing packages
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+
+from scipy.integrate import solve_ivp
+from scipy.optimize import fsolve
+
+from tqdm import tqdm
+
+from matplotlib import colormaps
+
+from numba import jit
+```
+
+```{python}
+#| label: defining colourmap
+cmap=colormaps['rainbow']
+cmap_reds=colormaps['Reds']
+cmap_greens=colormaps['Greens']
+cmap_oranges=colormaps['Oranges']
+cmap_blues=colormaps['Blues']
+```
+
+# Functions
+
+```{python}
+#| label: Index Helper function
+def index_helpers(N):
+    #indices of first N mesh points
+    ii=np.arange(0,N,dtype=np.uint64)
+
+    #indices of one mesh point to the left, except at the LH boundary
+    im1=ii-1
+    im1[0]=1
+
+    #indices of one mesh point to the right, except at the RH boundary
+    ip1=ii+1
+    ip1[-1]=N-2
+
+    #indices of all mesh points and an extra index at the RH boundary
+    iip=np.arange(0,N+1,dtype=np.uint64)
+    iip[-1]=N-2
+
+    #indices of one mesh point to the left, except at the LH boundary
+    ipre=np.arange(0,N+1,dtype=np.uint64)
+    ipre=ipre-1
+    ipre[0]=1
+
+    return ii,im1,ip1,iip,ipre
+```
+
+```{python}
+#| label: PIHNA discretisation function
+def pinha1d_central(t,z):
+    c=z[0:N]
+    h=z[N:2*N]
+    n=z[2*N:3*N]
+    v=z[3*N:4*N]
+    a=z[4*N:]
+    T=(c+h+n+v)/K
+    if np.sum(v)==0 and np.sum(c)==0 and np.sum(h)==0:
+        V=np.zeros(N)
+    else:
+        #V=v/(v+c+h)
+        V=v/(v+(P_c*c+P_h*h)/((u0/v0)-1))
+
+    D_fun=(2-T[ipre]-T[iip])/2
+    dcdx=(c[iip]-c[ipre])/(dx**2)
+    dhdx=(h[iip]-h[ipre])/(dx**2)
+    dvdx=(v[iip]-v[ipre])/(dx**2)
+    dadx=(a[im1]-2*a[ii]+a[ip1])/(dx**2)
+    c_spatial=D_c*(D_fun[ii+1]*dcdx[ii+1]-D_fun[ii]*dcdx[ii])
+    h_spatial=D_h*(D_fun[ii+1]*dhdx[ii+1]-D_fun[ii]*dhdx[ii])
+    v_spatial=D_v*(D_fun[ii+1]*dvdx[ii+1]-D_fun[ii]*dvdx[ii])
+    a_spatial=D_a*dadx
+    #-q*mu*(a/(K_m+a))*v*(1-T)-omega*a*v-lamb*a
+
+    return np.concatenate((c_spatial+rho*c*(1-T)+gamma*h*V-beta*c*(1-V)-alpha_n*n*c/K,h_spatial-gamma*h*V+beta*c*(1-V)-(alpha_h*h*(1-V)+alpha_n*n*h/K),alpha_h*h*(1-V)+alpha_n*n*(c+h+v)/K,v_spatial+mu*(a/(K_m+a))*v*(1-T)-alpha_n*n*v/K,a_spatial+delta_c*c+delta_h*h-q*mu*(a/(K_m+a))*v*(1-T)-omega*a*v-lamb*a))
+```
+
+```{python}
+#| label: ALA discretisation function
+def ala_central(t,z):
+    ao=z[0:N]
+    ah=z[N:2*N]
+    ac=z[2*N:3*N]
+    p=z[3*N:4*N]
+    po=z[4*N:5*N]
+    hi=z[5*N:]
+
+    daodx=(ao[im1]-2*ao[ii]+ao[ip1])/(dx**2)
+    dpodx=(po[im1]-2*po[ii]+po[ip1])/(dx**2)
+    ao_spatial=D_ao*daodx
+    po_spatial=D_po*dpodx
+
+    return np.concatenate((ao_spatial-k_h*h*ao-k_c*c*ao+k_mh*ah+k_mc*ac,k_h*h*ao-r_h*ah-k_mh*ah,k_c*c*ao-r_c*ac-k_mc*ac,r_h*ah+r_c*ac-r_2*p-k_m2*p+k_2*(c+h)*po,po_spatial+k_m2*p-k_2*(c+h)*po,r_2*p-r_3*hi))
+```
+
+# Initial Parameters 
+
+```{python}
+#| label: Defining initial PIHNA parameters
+D_c=50/365 #normoxic diffusion
+D_h=5*D_c #hypoxia diffusion
+D_v=0.18/365 #vasculature diffusion
+D_a=3.15/365 #angiogenic diffusion
+
+rho=50/365 #normoxic proliferation
+beta=0.5*rho 
+gamma=0.05
+alpha_h=0.1*beta
+alpha_n=np.log(2)/25
+delta_c=(2.77e-13)/365
+delta_h=(5.22e-10)/365
+mu=np.log(2)/15
+q=1.66
+lamb=15.6
+K=1
+v0=0.1*K
+u0=K
+omega=lamb/v0
+P_c=1.66
+P_h=1.66
+K_m=1
+```
+
+```{python}
+#| label: Defining initial ALA parameters
+D_ao=0.0001
+k_h=0.5
+k_c=0.5
+k_mc=0.1
+k_mh=0.1
+r_h=0.1
+r_c=1
+r_2=1.2
+k_2=1
+k_m2=0.1
+D_po=0.0001
+r_3=0.5
+```
+
+```{python}
+#| label: initial PIHNA simulation parameters
+N=201
+L=400
+tmax=300
+nplots=50
+dx=L/(N-1)
+ii,im1,ip1,iip,ipre=index_helpers(N)
+```
+
+```{python}
+#| label: initial ALA simulation parameters
+tmax_ala=24
+nplots=50
+```
+
+## Simulation - Initial Parameters
+
+### PIHNA
+
+```{python}
+#| label: PIHNA simulation - initial parameters
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.75*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+```
+
+```{python}
+#| label: Plot Initial Simulation
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 500', 'Day 1000']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 500'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 500'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 500'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 1000'].plot(xx,sol_pihna.y[0:N,-1],color='green')
+axs['Day 1000'].plot(xx,sol_pihna.y[N:2*N,-1],color='orange')
+axs['Day 1000'].plot(xx,sol_pihna.y[2*N:3*N,-1],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 500'].set(title='Day 175')
+axs['Day 1000'].set(title='Day 350')
+
+custom_lines=[Line2D([0],[0],color='green',label='Normoxic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='red',label='Necrotic')]
+axs['Day 1000'].legend(handles=custom_lines)
+
+plt.show()
+```
+
+```{python}
+#| label: Initial simulation animation 
+fig,ax=plt.subplots()
+
+normoxic_line=ax.plot(xx,sol_pihna.y[0:N,0],color='green')[0]
+hypoxic_line=ax.plot(xx,sol_pihna.y[N:2*N,0],color='orange')[0]
+necrotic_line=ax.plot(xx,sol_pihna.y[2*N:3*N,0],color='red')[0]
+ax.set(ylabel='Cells',ylim=(0,1.05))
+
+def update(frame):
+    normoxic_data=sol_pihna.y[0:N,frame]
+    hypoxic_data=sol_pihna.y[N:2*N,frame]
+    necrotic_data=sol_pihna.y[2*N:3*N,frame]
+    normoxic_line.set_ydata(normoxic_data)
+    hypoxic_line.set_ydata(hypoxic_data)
+    necrotic_line.set_ydata(necrotic_data)
+    return (normoxic_line,hypoxic_line,necrotic_line)
+
+custom_lines=[Line2D([0],[0],color='green',label='Normoxic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='red',label='Necrotic')]
+fig.legend(handles=custom_lines,bbox_to_anchor=(0.905,0.89))
+ani=animation.FuncAnimation(fig=fig,func=update,frames=nplots,interval=250)
+ani.save('pihna_1d_initial.mp4')
+plt.show()
+```
+
+```{python}
+
+#| label: Initial vasculature simulation animation 
+fig,ax=plt.subplots()
+
+vasculature_line=ax.plot(xx,sol_pihna.y[3*N:4*N,0],color='blue')[0]
+ax.set(ylabel='Cells',ylim=(0,0.04))
+
+def update(frame):
+    vasculature_data=sol_pihna.y[3*N:4*N,frame]
+    vasculature_line.set_ydata(vasculature_data)
+    return (vasculature_line)
+
+ani=animation.FuncAnimation(fig=fig,func=update,frames=nplots,interval=250)
+ani.save('vasculature_initial.mp4')
+plt.show()
+```
+
+### 5-ALA
+
+```{python}
+#| label: Defining final simulated tumour
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+```
+
+```{python}
+#| label: 5-ALA simulation
+ii,im1,ip1,iip,ipre=index_helpers(N)
+
+xx=np.linspace(0,L,N)
+tspan_ala=[0,tmax_ala]
+t_eval_ala=np.linspace(0,tmax_ala,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan_ala,z0_ala,t_eval=t_eval_ala,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+```
+
+```{python}
+p_fig=sol_ala.y[3*N:4*N]
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['tum','flo','tc']],layout='constrained',figsize=(12,3))
+
+axs['tum'].plot(xx,c,color='green')
+axs['tum'].plot(xx,h,color='orange')
+axs['tum'].plot(xx,n,color='red')
+axs['tum'].axvline(xx[52],color='blue')
+axs['tum'].axvline(xx[70],color='b',linestyle='-.')
+axs['tum'].axvline(xx[85],color='blue',linestyle='--')
+axs['tum'].set(xlabel='x',ylabel='Cells',title='Simulated Tumour')
+axs['tum'].set_xticks([xx[52],xx[70],xx[85]],labels=['1','2','3'])
+
+axs['flo'].plot(xx,sol_ala.y[3*N:4*N,0],color='magenta',linestyle='--')
+axs['flo'].plot(xx,sol_ala.y[3*N:4*N,25],color='magenta',linestyle='-.')
+axs['flo'].plot(xx,sol_ala.y[3*N:4*N,-1],color='magenta')
+axs['flo'].set(xticks=[],xlabel='x',ylabel='Fluorescence',title='Fluorescence')
+custom_lines=[Line2D([0],[0],color='magenta',linestyle='--',label='0'),Line2D([0],[0],color='magenta',linestyle='-.',label='12'),Line2D([0],[0],color='magenta',label='24')]
+axs['flo'].legend(handles=custom_lines,title='Hour')
+
+axs['tc'].plot(t_eval_ala,p[52],color='blue')
+axs['tc'].plot(t_eval_ala,p[70],color='blue',linestyle='-.')
+axs['tc'].plot(t_eval_ala,p[85],color='blue',linestyle='--')
+axs['tc'].set(xlabel='t (Hours)',ylabel='Fluorescence',title='Fluorescence Timecourse')
+custom_lines_tc=[Line2D([0],[0],color='b',label='1'),Line2D([0],[0],color='b',linestyle='-.',label='2'),Line2D([0],[0],color='b',linestyle='--',label='3')]
+axs['tc'].legend(handles=custom_lines_tc,title='Sample')
+
+plt.show()
+```
+
+```{python}
+#| label: Plot initial 5-ala simulation
+fig,axs=plt.subplot_mosaic([['ao','po'],['ah','ac'],['p','hi']],layout='constrained',figsize=(8,6))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+axs['ac'].set(xticks=[])
+axs['p'].set(xlabel='x')
+axs['hi'].set(xlabel='x')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+custom_lines=[Line2D([0],[0],linestyle='--',label='0',color='k'),Line2D([0],[0],linestyle='-.',label='12',color='k'),Line2D([0],[0],label='24',color='k')]
+fig.legend(handles=custom_lines,title='Hour',bbox_to_anchor=(1.15,1),fontsize=15)
+
+plt.show()
+```
+
+```{python}
+#| label: initial 5-ala animation
+fig,axs=plt.subplot_mosaic([['ao','po'],['ah','ac'],['p','hi']],layout='constrained',figsize=(8,6))
+
+axs['ao'].set(xticks=[],title='Outside Cell: 5-ALA')
+axs['po'].set(ylim=(0,0.0008),xticks=[],title='Outside Cell: PpIX')
+axs['ah'].set(ylim=(0,0.0008),xticks=[],title='Inside Cell: 5-ALA - Hypoxic')
+axs['ac'].set(ylim=(0,0.008),xticks=[],title='Inside Cell: 5-ALA - Normoxic')
+axs['p'].set(ylim=(0,0.008),title='Inside Cell: PpIX')
+axs['hi'].set(ylim=(0,0.008),title='Inside Cell: Heme')
+
+ao_line=axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange')[0]
+po_line=axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='purple')[0]
+ah_line=axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='lime')[0]
+ac_line=axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green')[0]
+p_line=axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue')[0]
+hi_line=axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red')[0]
+
+def update(frame):
+    ao_data=sol_ala.y[0:N,frame]
+    po_data=sol_ala.y[4*N:5*N,frame]
+    ah_data=sol_ala.y[N:2*N,frame]
+    ac_data=sol_ala.y[2*N:3*N,frame]
+    p_data=sol_ala.y[3*N:4*N,frame]
+    hi_data=sol_ala.y[5*N:,frame]
+    ao_line.set_ydata(ao_data)
+    po_line.set_ydata(po_data)
+    ah_line.set_ydata(ah_data)
+    ac_line.set_ydata(ac_data)
+    p_line.set_ydata(p_data)
+    hi_line.set_ydata(hi_data)
+    return (ao_line,po_line,ah_line,ac_line,p_line,hi_line)
+
+ani=animation.FuncAnimation(fig=fig,func=update,frames=nplots,interval=250)
+ani.save('ala_initial.mp4')
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['tum','tum'],['tc','comp']],layout='constrained')
+axs['tum'].plot(xx,c,color='green')
+axs['tum'].plot(xx,h,color='orange')
+axs['tum'].plot(xx,n,color='red')
+
+axs['tc'].plot(t_eval_ala,p[52])
+axs['tc'].plot(t_eval_ala,p[70])
+axs['tc'].plot(t_eval_ala,p[85])
+
+axs['comp'].axhspan(0,n[52],0,1/3,color='red')
+axs['comp'].axhspan(n[52],n[52]+h[52],0,1/3,color='orange')
+axs['comp'].axhspan(n[52]+h[52],n[52]+h[52]+c[52],0,1/3,color='green')
+axs['comp'].axhspan(0,n[70],1/3,2/3,color='red')
+axs['comp'].axhspan(n[70],n[70]+h[70],1/3,2/3,color='orange')
+axs['comp'].axhspan(n[70]+h[70],n[70]+h[70]+c[70],1/3,2/3,color='green')
+axs['comp'].axhspan(0,n[85],0,1/3,color='red')
+axs['comp'].axhspan(n[85],n[85]+h[85],2/3,3/3,color='orange')
+axs['comp'].axhspan(n[85]+h[85],n[85]+h[85]+c[52],2/3,1,color='green')
+
+plt.show()
+```
+
+# Resection
+
+```{python}
+#| label: Defining resection function
+def resection(p,c,h,n,thresh):
+    flair_resect=np.zeros(c.size)
+    t1gd_resect=np.zeros(c.size)
+    for i in range(c.size):
+        if c[i]+h[i]+n[i]>=0.16:
+            flair_resect[i]=0
+        else:
+            flair_resect[i]=c[i]+h[i]+n[i]
+        if c[i]+h[i]+n[i]>=0.8:
+            t1gd_resect[i]=0
+        else:
+            t1gd_resect[i]=c[i]+h[i]+n[i]
+    p_resect=np.zeros_like(p)
+    for k in range(p.shape[1]):
+        for i in range(p.shape[0]):
+            if p[i,k]>=thresh:
+                p_resect[i,k]=0
+            else:
+                p_resect[i,k]=c[i]+h[i]+n[i]
+    return flair_resect,t1gd_resect,p_resect
+```
+
+```{python}
+#| label: Defining updated resection function
+def resection_upd(p,c,h,n,thresh):
+    flair_resect=np.zeros(c.size)
+    t1gd_resect=np.zeros(c.size)
+    for i in range(c.size):
+        if c[i]+h[i]+n[i]>=0.16:
+            flair_resect[i]=0
+        else:
+            flair_resect[i]=c[i]+h[i]+n[i]
+        if c[i]+h[i]+n[i]>=0.8:
+            t1gd_resect[i]=0
+        else:
+            t1gd_resect[i]=c[i]+h[i]+n[i]
+    p_resect_rad=np.zeros(p.shape[1])
+    p_resect=np.zeros_like(p)
+    for k in range(p.shape[1]):
+        x_rad=0
+        for i in range(p.shape[0]):
+            if p[i,k]>=thresh:
+                x_rad=(L/2)-xx[i]
+                break
+        p_resect_rad[k]=x_rad
+        for i in range(p.shape[0]):
+            if np.abs((L/2)-xx[i])>=p_resect_rad[k]:
+                p_resect[i,k]=0
+            else:
+                p_resect[i,k]=c[i]+h[i]+n[i]
+    return flair_resect,t1gd_resect,p_resect_rad,p_resect
+```
+
+```{python}
+#| label: initial resection simulation
+p=sol_ala.y[3*N:4*N]
+flair_resect,t1gd_resect,p_resect=resection(p,c,h,n,1e-3)
+flair_resect_upd,t1gd_resect_upd,p_resect_rad_upd, p_resect_upd=resection_upd(p,c,h,n,5e-4)
+flair_resect_upd,t1gd_resect_upd,p_resect_rad_upd_2, p_resect_upd_2=resection_upd(p,c,h,n,2e-4)
+flair_resect_upd,t1gd_resect_upd,p_resect_rad_upd_8, p_resect_upd_8=resection_upd(p,c,h,n,8e-4)
+```
+
+```{python}
+fig,axs=plt.subplots(1,2,layout='constrained',figsize=(7,3),sharey='all')
+axs[0].plot(xx,c+h+n,color='purple')
+axs[0].axhline(0.16,color='red',linestyle='--')
+axs[0].axhline(0.8,color='blue',linestyle='--')
+axs[0].set_title('Before Resection',fontsize=13)
+axs[0].set(xticks=[],xlabel='x',ylabel='Cells')
+axs[1].plot(xx,t1gd_resect,color='blue')
+axs[1].plot(xx,flair_resect,color='red')
+axs[1].set_title('After Resection',fontsize=13)
+axs[1].set(xticks=[],xlabel='x')
+axs[0].set_yticks([0,0.1,0.16,0.4,0.6,0.8,1],labels=[0,0.1,'FLAIR',0.4,0.6,'T1Gd',1])
+custom_lines=[Line2D([0],[0],color='red',label='FLAIR'),Line2D([0],[0],color='blue',label='T1Gd')]
+axs[1].legend(handles=custom_lines,title='Imaging Type')
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(1,2,layout='constrained',figsize=(6,3))
+axs[0].plot(xx,p[:,12],color='blue')
+axs[0].axhline(4e-4,color='orange',linestyle='--')
+axs[0].axhline(2e-4,color='red',linestyle='--')
+axs[0].axhline(8e-4,color='green',linestyle='--')
+axs[1].plot(p_resect_upd_8[:,12],color='green')
+axs[1].plot(p_resect_upd[:,12],color='orange')
+axs[1].plot(p_resect_upd_2[:,12],color='red')
+
+axs[1].set_ylim(-.05,1)
+axs[1].set_ylabel('Cells')
+axs[0].set_ylabel('Fluorescence')
+axs[0].set_title('Fluorescence at Time\nof Resection')
+axs[1].set_title('Tumour After Resection')
+axs[0].set(xticks=[],xlabel='x')
+axs[1].set(xticks=[],xlabel='x')
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(1,2,layout='constrained',figsize=(6,2),sharey='all')
+axs[0].plot(xx,flair_resect,color='black',linestyle='--')
+axs[0].plot(xx,t1gd_resect,color='grey',linestyle='--')
+for k in range(p_resect.shape[1]):
+    if k%10==0:
+        axs[1].plot(xx,p_resect[:,k],color=cmap(k/p_resect.shape[1]))
+axs[0].set(xticks=[],ylabel='Cells',title='Imaging Resection')
+axs[1].set(xticks=[],title='Fluorescence Threshold')
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(1,2,layout='constrained',figsize=(6,2),sharey='all')
+axs[0].plot(xx,flair_resect_upd,color='black',linestyle='--')
+axs[0].plot(xx,t1gd_resect_upd,color='grey',linestyle='--')
+for k in range(p.shape[1]):
+    axs[1].plot(xx,p_resect_upd[:,k],color=cmap(k/p_resect.shape[1]))
+axs[0].set(xticks=[],ylabel='Cells',title='Imaging Resection')
+axs[1].set(xticks=[],title='Fluorescence Threshold')
+plt.show()
+```
+
+```{python}
+plt.plot(xx,t1gd_resect_upd,color='blue')
+plt.plot(xx,flair_resect_upd,color='red')
+custom_lines=[Line2D([0],[0],color='blue',label='T1Gd'),Line2D([0],[0],color='r',label='FLAIR')]
+plt.ylim(0,1)
+plt.legend(handles=custom_lines)
+plt.ylabel('Cells')
+plt.xlabel('x')
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['rad','rad','rad'],['1','8','16']],layout='constrained',figsize=(8,6))
+axs['rad'].plot(t_eval_ala,p_resect_rad_upd,color='blue')
+axs['rad'].axvline(t_eval_ala[2],linestyle='--',color='red')
+axs['rad'].axvline(t_eval_ala[16],linestyle='--',color='orange')
+axs['rad'].axvline(t_eval_ala[32],linestyle='--',color='green')
+axs['rad'].set(ylabel='Resection Radius',xlabel='t (Hours)')
+axs['rad'].set_xticks(ticks=[0,1,5,t_eval_ala[16],10,15,t_eval_ala[32],20,24],labels=[0,1,5,8,10,15,16,20,24])
+axs['1'].plot(xx,p_resect_upd[:,2],color='red')
+axs['1'].set(ylim=(0,1.1),title='1 Hour')
+axs['8'].plot(xx,p_resect_upd[:,16],color='orange')
+axs['8'].set(ylim=(0,1.1),yticks=[],title='8 Hours')
+axs['16'].plot(xx,p_resect_upd[:,32],color='green')
+axs['16'].set(ylim=(0,1.1),yticks=[],title='16 Hours')
+axs['1'].set(ylabel='Cells',xlabel='x')
+axs['8'].set(xlabel='x')
+axs['16'].set(xlabel='x')
+plt.show()
+```
+
+# PIHNA Parameters ($D_c$, $\rho$)
+
+## $D_c$
+
+```{python}
+#D_cs=[0.0001,0.00025,0.0005,0.00075,0.001,0.0025,0.005,0.0075,0.01,0.025,0.05,0.075,0.1,0.25,0.5,0.75,1]
+D_cs=np.logspace(-2,0,30)
+c_dc=[]
+h_dc=[]
+n_dc=[]
+v_dc=[]
+a_dc=[]
+for i in tqdm(range(D_cs.size)):
+    D_c=D_cs[i]
+    D_h=5*D_c
+    rho=10/365
+    beta=0.5*rho
+    alpha_h=0.1*beta
+    sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+    c_dc.append(sol_pihna.y[0:N])
+    h_dc.append(sol_pihna.y[N:2*N])
+    n_dc.append(sol_pihna.y[2*N:3*N])
+    v_dc.append(sol_pihna.y[3*N:4*N])
+    a_dc.append(sol_pihna.y[4*N:])
+```
+
+```{python}
+ao_dc=[]
+ac_dc=[]
+ah_dc=[]
+po_dc=[]
+p_dc=[]
+hi_dc=[]
+for i in tqdm(range(D_cs.size)):
+    c=c_dc[i][:,-1]
+    h=h_dc[i][:,-1]
+    n=n_dc[i][:,-1]
+    a=a_dc[i][:,-1]
+    v=v_dc[i][:,-1]
+    a0=0.5*v
+    ah0=np.zeros(N,dtype=np.float64)
+    ac0=np.zeros(N,dtype=np.float64)
+    p0=np.zeros(N,dtype=np.float64)
+    po0=np.zeros(N,dtype=np.float64)
+    hi0=np.zeros(N,dtype=np.float64)
+
+    z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+    sol_ala=solve_ivp(ala_central,tspan_ala,z0_ala,t_eval=t_eval_ala,method='RK45')
+    ao_dc.append(sol_ala.y[0:N])
+    po_dc.append(sol_ala.y[4*N:5*N])
+    ah_dc.append(sol_ala.y[N:2*N])
+    ac_dc.append(sol_ala.y[2*N:3*N])
+    p_dc.append(sol_ala.y[3*N:4*N])
+    hi_dc.append(sol_ala.y[5*N:])
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['c','h'],['n','v']],layout='constrained')
+axs['c'].set(xticks=[],title='Normoxic')
+axs['h'].set(xticks=[],title='Hypoxic')
+axs['n'].set(title='Necrotic')
+axs['v'].set(title='Vasculature')
+for i in range(len(D_cs)):
+    axs['c'].plot(xx,c_dc[i][:,-1],color=cmap_greens(i/D_cs.size))
+    axs['h'].plot(xx,h_dc[i][:,-1],color=cmap_oranges(i/D_cs.size))
+    axs['n'].plot(xx,n_dc[i][:,-1],color=cmap_reds(i/D_cs.size))
+    axs['v'].plot(xx,v_dc[i][:,-1],color=cmap_blues(i/D_cs.size))
+axs['c'].set(ylim=(0,1))
+axs['h'].set(ylim=(0,1),yticks=[])
+axs['n'].set(ylim=(0,1))
+fig.suptitle('$D_c$')
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(3,1,layout='constrained')
+for i in range(D_cs.size):
+    axs[0].plot(xx,p_dc[i][:,15],color=cmap_blues(i/D_cs.size))
+    axs[1].plot(xx,p_dc[i][:,30],color=cmap_blues(i/D_cs.size))
+    axs[2].plot(xx,p_dc[i][:,45],color=cmap_blues(i/D_cs.size))
+axs[0].set(xticks=[],ylim=(0,1e-3),title='6 hours',ylabel='Fluorescence')
+axs[0].set_yticks(ticks=[0,2.5e-4,5e-4,7.5e-4,1e-3],labels=[0,2.5,5,7.5,10])
+axs[1].set(xticks=[],ylim=(0,1e-3),title='12 hours',ylabel='Fluorescence')
+axs[1].set_yticks(ticks=[0,2.5e-4,5e-4,7.5e-4,1e-3],labels=[0,2.5,5,7.5,10])
+axs[2].set(title='18 hours',ylim=(0,1e-3),ylabel='Fluorescence')
+axs[2].set_yticks(ticks=[0,2.5e-4,5e-4,7.5e-4,1e-3],labels=[0,2.5,5,7.5,10])
+plt.show()
+```
+
+```{python}
+resection_dc=[]
+flair_resect_dc=[]
+t1gd_resect_dc=[]
+amount_dc=[]
+for j in range(D_cs.size):
+    flair_resect,t1gd_resect,p_rad_resect,p_resect=resection_upd(p=p_dc[j],c=c_dc[j][:,-1],h=h_dc[j][:,-1],n=n_dc[j][:,-1],thresh=0.0005)
+    amount_dc.append((np.sum(c_dc[j][:,-1])+np.sum(h_dc[j][:,-1])+np.sum(n_dc[j][:,-1])-np.sum(p_resect,axis=0))/(np.sum(c_dc[j][:,-1])+np.sum(h_dc[j][:,-1])+np.sum(n_dc[j][:,-1])))
+    resection_dc.append(p_rad_resect)
+    flair_resect_dc.append(flair_resect)
+    t1gd_resect_dc.append(t1gd_resect)
+```
+
+```{python}
+for i in range(len(resection_dc)):
+    if i%5==0:
+        plt.plot(t_eval_ala,amount_dc[i],color=cmap(i/D_cs.size),label=np.round(D_cs[i],3))
+    else:
+        plt.plot(t_eval_ala,amount_dc[i],color=cmap(i/D_cs.size))
+    #plt.axhline(np.sum(flair_resect_dc[j]),color=cmap(i/len(D_cs)))
+    #plt.axhline(np.sum(t1gd_resect_dc[j]),color=cmap(i/len(D_cs)),linestyle='--')
+plt.ylabel('Proportion of Tumour Remaining')
+plt.legend(title='$D_c$',bbox_to_anchor=(1,1))
+plt.xlabel('t (Hours)')
+plt.title('$D_c$',fontsize=15)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(2,2,layout='constrained')
+for i in range(D_cs.size):
+    axs[0,0].plot(flair_resect_dc[i],color=cmap(i/D_cs.size))
+    axs[0,1].plot(t1gd_resect_dc[i],color=cmap(i/D_cs.size),linestyle='--')
+    axs[1,0].axhline(np.sum(flair_resect_dc[i]),color=cmap(i/D_cs.size))
+    axs[1,1].axhline(np.sum(t1gd_resect_dc[i]),color=cmap(i/D_cs.size),linestyle='--')
+axs[0,0].set(title='FLAIR',ylim=(0,0.85),xticks=[],ylabel='Cells')
+axs[0,1].set(title='T1Gd',ylim=(0,0.85),yticks=[],xticks=[])
+axs[1,0].set(xticks=[],ylabel='Number of cells post resection')
+axs[1,1].set(xticks=[])
+fig.suptitle('Resection ($D_c$)')
+plt.show()
+```
+
+## $\rho$
+
+```{python}
+#rhos=[0.0001,0.00025,0.0005,0.00075,0.001,0.0025,0.005,0.0075,0.01,0.025,0.05,0.075,0.1,0.25,0.5,0.75,1]
+rhos=np.logspace(-2,0,30)
+c_r=[]
+h_r=[]
+n_r=[]
+v_r=[]
+a_r=[]
+for i in tqdm(range(rhos.size)):
+    D_c=10/365
+    D_h=5*D_c
+    rho=rhos[i]
+    beta=0.5*rho
+    alpha_h=0.1*beta
+    sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+    c_r.append(sol_pihna.y[0:N])
+    h_r.append(sol_pihna.y[N:2*N])
+    n_r.append(sol_pihna.y[2*N:3*N])
+    v_r.append(sol_pihna.y[3*N:4*N])
+    a_r.append(sol_pihna.y[4*N:])
+```
+
+```{python}
+ao_r=[]
+ac_r=[]
+ah_r=[]
+po_r=[]
+p_r=[]
+hi_r=[]
+for i in tqdm(range(rhos.size)):
+    c=c_r[i][:,-1]
+    h=h_r[i][:,-1]
+    n=n_r[i][:,-1]
+    a=a_r[i][:,-1]
+    v=v_r[i][:,-1]
+    a0=0.5*v
+    ah0=np.zeros(N,dtype=np.float64)
+    ac0=np.zeros(N,dtype=np.float64)
+    p0=np.zeros(N,dtype=np.float64)
+    po0=np.zeros(N,dtype=np.float64)
+    hi0=np.zeros(N,dtype=np.float64)
+
+    z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+    sol_ala=solve_ivp(ala_central,tspan_ala,z0_ala,t_eval=t_eval_ala,method='RK45')
+    ao_r.append(sol_ala.y[0:N])
+    po_r.append(sol_ala.y[4*N:5*N])
+    ah_r.append(sol_ala.y[N:2*N])
+    ac_r.append(sol_ala.y[2*N:3*N])
+    p_r.append(sol_ala.y[3*N:4*N])
+    hi_r.append(sol_ala.y[5*N:])
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['c','h'],['n','v']],layout='constrained')
+axs['c'].set(xticks=[],title='Normoxic',ylim=(0,1))
+axs['h'].set(xticks=[],title='Hypoxic',ylim=(0,1),yticks=[])
+axs['n'].set(title='Necrotic',ylim=(0,1))
+axs['v'].set(title='Vasculature')
+for i in range(rhos.size):
+    axs['c'].plot(xx,c_r[i][:,-1],color=cmap_greens(i/rhos.size))
+    axs['h'].plot(xx,h_r[i][:,-1],color=cmap_oranges(i/rhos.size))
+    axs['n'].plot(xx,n_r[i][:,-1],color=cmap_reds(i/rhos.size))
+    axs['v'].plot(xx,v_r[i][:,-1],color=cmap_blues(i/rhos.size))
+fig.suptitle(r'$\rho$')
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(3,1,layout='constrained')
+for i in range(rhos.size):
+    axs[0].plot(xx,p_r[i][:,15],color=cmap_blues(i/rhos.size))
+    axs[1].plot(xx,p_r[i][:,30],color=cmap_blues(i/rhos.size))
+    axs[2].plot(xx,p_r[i][:,45],color=cmap_blues(i/rhos.size))
+axs[0].set(xticks=[],title='6 hours',ylabel='Fluorescence',ylim=(0,1e-3))
+axs[0].set_yticks(ticks=[0,2.5e-4,5e-4,7.5e-4,1e-3],labels=[0,2.5,5,7.5,1])
+axs[1].set(xticks=[],title='12 hours',ylabel='Fluorescence',ylim=(0,7.5e-4))
+axs[1].set_yticks(ticks=[0,2.5e-4,5e-4,7.5e-4,1e-3],labels=[0,2.5,5,7.5,1])
+axs[2].set(title='18 hours',ylabel='Fluorescence',ylim=(0,7.5e-4))
+axs[2].set_yticks(ticks=[0,2.5e-4,5e-4,7.5e-4,1e-3],labels=[0,2.5,5,7.5,1])
+plt.show()
+```
+
+```{python}
+resection_r=[]
+flair_resect_r=[]
+t1gd_resect_r=[]
+amount_r=[]
+for j in range(rhos.size):
+    flair_resect,t1gd_resect,p_rad_resect,p_resect=resection_upd(p=p_r[j],c=c_r[j][:,-1],h=h_r[j][:,-1],n=n_r[j][:,-1],thresh=0.00035)
+    amount_r.append((np.sum(c_r[j][:,-1])+np.sum(h_r[j][:,-1])+np.sum(n_r[j][:,-1])-np.sum(p_resect,axis=0))/(np.sum(c_r[j][:,-1])+np.sum(h_r[j][:,-1])+np.sum(n_r[j][:,-1])))
+    resection_r.append(p_rad_resect)
+    flair_resect_r.append(flair_resect)
+    t1gd_resect_r.append(t1gd_resect)
+```
+
+```{python}
+for i in range(len(resection_r)):
+    if i%5==0:
+        plt.plot(t_eval_ala,amount_r[i],color=cmap(i/rhos.size),label=np.round(rhos[i],3))
+    else:
+        plt.plot(t_eval_ala,amount_r[i],color=cmap(i/rhos.size))
+plt.ylabel('Proportion of Remaining Tumour',fontsize=13)
+plt.legend(title=r'$\rho$',bbox_to_anchor=(1,1))
+plt.xlabel('t (Hours)',fontsize=13)
+plt.title(r'$\rho$',fontsize=20)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(2,2,layout='constrained')
+for i in range(rhos.size):
+    axs[0,0].plot(flair_resect_r[i],color=cmap(i/rhos.size))
+    axs[0,1].plot(t1gd_resect_r[i],color=cmap(i/rhos.size),linestyle='--')
+    axs[1,0].axhline(np.sum(flair_resect_r[i]),color=cmap(i/rhos.size))
+    axs[1,1].axhline(np.sum(t1gd_resect_r[i]),color=cmap(i/rhos.size),linestyle='--')
+
+axs[0,0].set(title='FLAIR',ylim=(0,0.85),xticks=[],ylabel='Cells')
+axs[0,1].set(title='T1Gd',ylim=(0,0.85),yticks=[],xticks=[])
+axs[1,0].set(xticks=[],ylabel='Number of cells post resection')
+axs[1,1].set(xticks=[])
+fig.suptitle(r'Resection ($\rho$)')
+plt.show()
+```
+
+## $D_c$ and $\rho$
+
+```{python}
+c_d_r=[]
+h_d_r=[]
+n_d_r=[]
+v_d_r=[]
+a_d_r=[]
+for i in tqdm(range(D_cs.size)):
+    c_d=[]
+    h_d=[]
+    n_d=[]
+    v_d=[]
+    a_d=[]
+    for j in range(rhos.size):
+        D_c=D_cs[i]
+        D_h=5*D_c
+        rho=rhos[j]
+        beta=0.5*rho
+        alpha_h=0.1*beta
+        sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+        c_d.append(sol_pihna.y[0:N])
+        h_d.append(sol_pihna.y[N:2*N])
+        n_d.append(sol_pihna.y[2*N:3*N])
+        v_d.append(sol_pihna.y[3*N:4*N])
+        a_d.append(sol_pihna.y[4*N:])
+    c_d_r.append(c_d)
+    h_d_r.append(h_d)
+    n_d_r.append(n_d)
+    v_d_r.append(v_d)
+    a_d_r.append(a_d)
+```
+
+```{python}
+ao_d_r=[]
+ac_d_r=[]
+ah_d_r=[]
+po_d_r=[]
+p_d_r=[]
+hi_d_r=[]
+for i in tqdm(range(D_cs.size)):
+    ao_d=[]
+    ac_d=[]
+    ah_d=[]
+    po_d=[]
+    p_d=[]
+    hi_d=[]
+    for j in range(rhos.size):
+        c=c_d_r[i][j][:,-1]
+        h=h_d_r[i][j][:,-1]
+        n=n_d_r[i][j][:,-1]
+        a=a_d_r[i][j][:,-1]
+        v=v_d_r[i][j][:,-1]
+        a0=0.5*v
+        ah0=np.zeros(N,dtype=np.float64)
+        ac0=np.zeros(N,dtype=np.float64)
+        p0=np.zeros(N,dtype=np.float64)
+        po0=np.zeros(N,dtype=np.float64)
+        hi0=np.zeros(N,dtype=np.float64)
+
+        z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+        sol_ala=solve_ivp(ala_central,tspan_ala,z0_ala,t_eval=t_eval_ala,method='RK45')
+        ao_d.append(sol_ala.y[0:N])
+        po_d.append(sol_ala.y[4*N:5*N])
+        ah_d.append(sol_ala.y[N:2*N])
+        ac_d.append(sol_ala.y[2*N:3*N])
+        p_d.append(sol_ala.y[3*N:4*N])
+        hi_d.append(sol_ala.y[5*N:])
+    ao_d_r.append(ao_d)
+    ac_d_r.append(ac_d)
+    ah_d_r.append(ah_d)
+    po_d_r.append(po_d)
+    p_d_r.append(p_d)
+    hi_d_r.append(hi_d)
+```
+
+```{python}
+resection_d_r=[]
+flair_resect_d_r=[]
+t1gd_resect_d_r=[]
+amount_d_r=[]
+for i in tqdm(range(D_cs.size)):
+    resection_d=[]
+    amount_d=[]
+    for j in range(rhos.size):
+        flair_resect,t1gd_resect,p_rad_resect,p_resect=resection_upd(p=p_d_r[i][j],c=c_d_r[i][j][:,-1],h=h_d_r[i][j][:,-1],n=n_d_r[i][j][:,-1],thresh=0.0013)
+        amount_d.append((np.sum(c_d_r[i][j][:,-1])+np.sum(h_d_r[i][j][:,-1])+np.sum(n_d_r[i][j][:,-1])-np.sum(p_resect,axis=0))/(np.sum(c_d_r[i][j][:,-1])+np.sum(h_d_r[i][j][:,-1])+np.sum(n_d_r[i][j][:,-1])))
+        resection_d_r.append(p_rad_resect)
+        flair_resect_d_r.append(flair_resect)
+        t1gd_resect_d_r.append(t1gd_resect)
+    resection_d_r.append(resection_d)
+    amount_d_r.append(amount_d)
+```
+
+```{python}
+min_optimal,max_optimal,p_optimal=np.zeros((D_cs.size,rhos.size)),np.zeros((D_cs.size,rhos.size)),np.zeros((D_cs.size,rhos.size))
+for i in range(D_cs.size):
+    for j in range(rhos.size):
+        p_optimal[i,j]=np.min(amount_d_r[i][j])
+        min_optimal[i,j]=t_eval_ala[np.argmin(amount_d_r[i][j])]
+        for k in range(np.argmin(amount_d_r[i][j]),t_eval_ala.size):
+            if amount_d_r[i][j][k]==p_optimal[i,j]:
+                max_optimal[i,j]=t_eval_ala[k]
+```
+
+```{python}
+plt.pcolormesh(p_optimal,cmap='Reds')
+plt.xticks(ticks=[0.5,4.5,9.5,14.5,19.5,24.5,29.5],labels=[0.01,0.02,0.05,0.1,0.25,0.5,1],rotation=45)
+plt.yticks(ticks=[0.5,4.5,9.5,14.5,19.5,24.5,29.5],labels=[0.01,0.02,0.05,0.1,0.25,0.5,1])
+plt.ylabel('$D_c$',fontsize=13)
+plt.xlabel(r'$\rho$',fontsize=13)
+plt.colorbar()
+plt.title('Remaining Tumour',fontsize=16)
+plt.show()
+```
+
+```{python}
+plt.pcolormesh(min_optimal,cmap='Greens')
+#plt.xticks(ticks=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5],labels=[0.0001,0.0005,0.001,0.005,0.01,0.05,0.1,0.5,1],rotation=45)
+#plt.yticks(ticks=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5],labels=[0.0001,0.0005,0.001,0.005,0.01,0.05,0.1,0.5,1],rotation=45)
+plt.ylabel('$D_c$',fontsize=13)
+plt.xlabel(r'$\rho$',fontsize=13)
+plt.colorbar()
+plt.title('Minimum Optimal Time',fontsize=16)
+plt.show()
+```
+
+```{python}
+plt.pcolormesh(max_optimal,cmap='Blues')
+#plt.xticks(ticks=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5],labels=[0.0001,0.0005,0.001,0.005,0.01,0.05,0.1,0.5,1],rotation=45)
+#plt.yticks(ticks=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5],labels=[0.0001,0.0005,0.001,0.005,0.01,0.05,0.1,0.5,1],rotation=45)
+plt.ylabel('$D_c$',fontsize=13)
+plt.xlabel(r'$\rho$',fontsize=13)
+plt.colorbar()
+plt.title('Maximum Optimal Time',fontsize=16)
+plt.show()
+```
+
+```{python}
+plt.pcolormesh(max_optimal-min_optimal,cmap='Purples')
+#plt.xticks(ticks=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5],labels=[0.0001,0.0005,0.001,0.005,0.01,0.05,0.1,0.5,1],rotation=45)
+#plt.yticks(ticks=[0.5,1.5,2.5,3.5,4.5,5.5,6.5,7.5,8.5],labels=[0.0001,0.0005,0.001,0.005,0.01,0.05,0.1,0.5,1],rotation=45)
+plt.ylabel('$D_c$',fontsize=13)
+plt.xlabel(r'$\rho$',fontsize=13)
+plt.colorbar()
+plt.title('Length of Optimal Time',fontsize=16)
+plt.show()
+```
+
+```{python}
+plt.plot(p_d_r[-2][1][:,-1],color='blue')
+plt.axhline(0.00035,color='blue')
+plt.xticks([])
+plt.ylabel('x')
+plt.title('Fluorescence')
+plt.show()
+```
+
+```{python}
+plt.plot(c_d_r[-2][1][:,-1],color='green')
+plt.plot(h_d_r[-2][1][:,-1],color='orange')
+plt.plot(n_d_r[-2][1][:,-1],color='red')
+plt.xticks([])
+plt.ylabel('Cells')
+plt.xlabel('x')
+plt.title('Tumour Composition')
+custom_lines=[Line2D([0],[0],color='green',label='Normoxic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='red',label='Necrotic')]
+plt.legend(handles=custom_lines)
+plt.show()
+```
+
+```{python}
+plt.plot(t_eval_ala,amount_d_r[-2][1],color='purple')
+plt.axvline(min_optimal[-2,1],color='green')
+plt.axvline(max_optimal[-2,1],color='blue')
+plt.ylabel('Proportion of Cells Remaining')
+plt.xlabel('t (Hours)')
+plt.show()
+```
+
+```{python}
+plt.plot(p_d_r[15][15][:,7],color='blue')
+plt.axhline(0.00035,color='blue')
+plt.xticks([])
+plt.ylabel('x')
+plt.title('Fluorescence')
+plt.show()
+```
+
+```{python}
+plt.plot(c_d_r[15][15][:,-1],color='green')
+plt.plot(h_d_r[15][15][:,-1],color='orange')
+plt.plot(n_d_r[15][15][:,-1],color='red')
+plt.xticks([])
+plt.ylabel('Cells')
+plt.xlabel('x')
+plt.title('Tumour Composition')
+custom_lines=[Line2D([0],[0],color='green',label='Normoxic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='red',label='Necrotic')]
+plt.legend(handles=custom_lines)
+plt.show()
+```
+
+```{python}
+plt.plot(t_eval_ala,amount_d_r[15][15],color='purple')
+plt.axvline(min_optimal[15,15],color='green')
+plt.axvline(max_optimal[15,15],color='blue')
+plt.ylabel('Proportion of Cells Remaining')
+plt.xlabel('t (Hours)')
+plt.show()
+```
+
+```{python}
+plt.plot(p_d_r[5][5][:,7],color='blue')
+plt.axhline(0.00035,color='blue')
+plt.xticks([])
+plt.ylabel('x')
+plt.title('Fluorescence')
+plt.show()
+```
+
+```{python}
+plt.plot(c_d_r[5][5][:,-1],color='green')
+plt.plot(h_d_r[5][5][:,-1],color='orange')
+plt.plot(n_d_r[5][5][:,-1],color='red')
+plt.xticks([])
+plt.ylabel('Cells')
+plt.xlabel('x')
+plt.title('Tumour Composition')
+custom_lines=[Line2D([0],[0],color='green',label='Normoxic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='red',label='Necrotic')]
+plt.legend(handles=custom_lines)
+plt.show()
+```
+
+```{python}
+plt.plot(t_eval_ala,amount_d_r[5][5],color='purple')
+plt.axvline(min_optimal[5,5],color='green')
+plt.axvline(max_optimal[5,5],color='blue')
+plt.ylabel('Proportion of Cells Remaining')
+plt.xlabel('t (Hours)')
+plt.show()
+```

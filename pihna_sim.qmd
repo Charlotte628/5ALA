@@ -1,0 +1,316 @@
+---
+title: PIHNA 2D Sim
+format:
+    html: 
+        toc: true
+        lightbox: true
+        code-overflow: wrap
+---
+
+```{python}
+#Import Packages
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import scipy
+import nilearn
+from tqdm import tqdm
+from nilearn import plotting
+from nilearn import image
+import os
+import nibabel as nib
+from matplotlib.colors import Normalize, ListedColormap
+from matplotlib import colormaps
+from matplotlib import animation
+
+from PIHNA_2d.set_interfaces import set_interfaces
+from PIHNA_2d.numerics_2d import numerics_2d, numerical_jacobian_jit
+
+from numba import jit
+```
+
+```{python}
+os.chdir('C:/Users/pmxcb7/OneDrive - The University of Nottingham/Recurrence in GBM/GLISTR')
+#Loading in probabilistic atlas and plotting maps
+CSF=image.smooth_img('IIT_CSF_tissue_prob.nii.gz',fwhm=3)
+WM=image.smooth_img('IIT_WM_tissue_prob.nii.gz',fwhm=3)
+GM=image.smooth_img('IIT_GM_tissue_prob.nii.gz',fwhm=3)
+nilearn.plotting.plot_prob_atlas((CSF,WM,GM),title='IIT Atlas',colorbar=True)
+#Loading probabilistic maps,finding outside the brain and defining slice 
+CSF_load=nib.load('IIT_CSF_tissue_prob.nii.gz').get_fdata()
+WM_load=nib.load('IIT_WM_tissue_prob.nii.gz').get_fdata()
+GM_load=nib.load('IIT_GM_tissue_prob.nii.gz').get_fdata()
+outside_brain=np.zeros((CSF_load.shape))
+for i in range(outside_brain.shape[0]):
+    for j in range(outside_brain.shape[1]):
+        for k in range(outside_brain.shape[2]):
+            if CSF_load[i,j,k]+WM_load[i,j,k]+GM_load[i,j,k]==0:
+                outside_brain[i,j,k]=1
+slice_no=100
+CSF_slice=CSF_load[:,:,slice_no]
+WM_slice=WM_load[:,:,slice_no]
+GM_slice=GM_load[:,:,slice_no]
+OB_slice=outside_brain[:,:,slice_no]
+#plotting slices of probibablistic maps
+fig,axs=plt.subplot_mosaic([['CSF','WM','GM','OB']],layout='constrained')
+axs['CSF'].imshow(CSF_slice)
+axs['WM'].imshow(WM_slice)
+axs['GM'].imshow(GM_slice)
+axs['OB'].imshow(OB_slice)
+plt.show()
+```
+
+```{python}
+slice_atlas=np.zeros((CSF_slice.shape[0],CSF_slice.shape[1]))
+for i in range(slice_atlas.shape[0]):
+    for j in range(slice_atlas.shape[1]):
+        if OB_slice[i,j]==0:
+            slice_atlas[i,j]=np.argmax(np.array([WM_slice[i,j],GM_slice[i,j],CSF_slice[i,j]]))
+        else: 
+            slice_atlas[i,j]=2
+Slice=slice_atlas
+```
+
+```{python}
+P={'R_wg':10,
+    'dt':0.05,
+    'dx':0.01,
+    'D_c':1e-5,
+    'D_h_mul':1,
+    'rho':1e-1,
+    'beta_mul':0.5,
+    'gamma':0.05,
+    'alpha_h_mul':0.1,
+    'alpha_n':np.log(2)/5,
+    'D_v':0.18,
+    'D_a':3.15,
+    'delta_c':2.77e-13,
+    'delta_h':5.22e-10,
+    'mu':np.log(2)*365/15,
+    'q':1.66,
+    'lam':15.6*365,
+    'K':1,
+    'Km':1,
+    'P_cw':2,
+    'P_hw':2,
+    'P_cg':1,
+    'P_hg':1,
+    'v0':0.03,
+    'u0':1
+}
+```
+
+```{python}
+Dweight1,Dweight2,Origin1,Origin2,Terminus1,Terminus2,ind_nz,boundary=set_interfaces(Slice,P)
+```
+
+```{python}
+cmap_bg=ListedColormap(['white','grey','lightblue','black'])
+n1,n2=Slice.shape
+o1i=np.unravel_index(Origin1,(n1,n2),'F')
+t1i=np.unravel_index(Terminus1,(n1,n2),'F')
+plt.pcolormesh(Slice,edgecolors='gray',linewidth=0.5,vmin=0,vmax=3,cmap=cmap_bg)
+plt.plot(o1i[1]+0.5,o1i[0]+0.5,'or')
+plt.plot(t1i[1]+0.5,t1i[0]+0.5,'xk')
+plt.gca().invert_yaxis()
+plt.show()
+```
+
+```{python}
+c0=np.zeros_like(Slice)
+v0=np.zeros_like(Slice)
+x=np.linspace(0,Slice.shape[0],Slice.shape[0])
+y=np.linspace(0,Slice.shape[1],Slice.shape[1])
+for i in range(Slice.shape[0]):
+    for j in range(Slice.shape[1]):
+        c0[i,j]=0.4*np.exp(-((x[i]-125)**2+(y[j]-90)**2)/5**2)
+        if Slice[i,j]<2:
+            v0[i,j]=0.03
+        #if (x[i]-75)**2+(y[j]-100)**2<81:
+            #c0[i,j]=1 
+        #else: 
+            #c0[i,j]=0
+IC={
+    'c0': c0,
+    'h0': np.zeros_like(Slice,dtype=np.float64),
+    'n0': np.zeros_like(Slice,dtype=np.float64),
+    'v0': v0,
+    'a0': np.zeros_like(Slice,dtype=np.float64)
+}
+```
+
+```{python}
+n1=Slice.shape[0]
+n2=Slice.shape[1]
+Simdata = numerics_2d(
+    Dweight1, Dweight2,
+    Origin1, Origin2,
+    Terminus1, Terminus2,
+    n1, n2, ind_nz, boundary,
+    IC, dayspersave=1, t_finish=365,
+    radiussave=0.1, radius_final=1.0,
+    P=P)
+```
+
+```{python}
+c=Simdata['c']
+h=Simdata['h']
+n=Simdata['n']
+v=Simdata['v']
+a=Simdata['a']
+rad1=Simdata['rad1']
+rad2=Simdata['rad2']
+```
+
+```{python}
+np.savetxt('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/c.csv',c)
+np.savetxt('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/h.csv',h)
+np.savetxt('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/n.csv',n)
+```
+
+```{python}
+c_df=pd.DataFrame(c)
+c_df.to_csv('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/c.csv',header=None)
+h_df=pd.DataFrame(h)
+h_df.to_csv('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/h.csv',header=None)
+n_df=pd.DataFrame(n)
+n_df.to_csv('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/n.csv',header=None)
+v_df=pd.DataFrame(v)
+v_df.to_csv('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/v.csv',header=None)
+```
+
+```{python}
+plt.plot(rad1,color='b')
+plt.plot(rad2,color='red')
+plt.ylabel('FLAIR')
+plt.show()
+```
+
+```{python}
+c_re,h_re,n_re,v_re,a_re=[],[],[],[],[]
+for i in range(c.shape[0]):
+    c_re.append(c[i].reshape((n1,n2),order='F'))
+    h_re.append(h[i].reshape((n1,n2),order='F'))
+    n_re.append(n[i].reshape((n1,n2),order='F'))
+    v_re.append(v[i].reshape((n1,n2),order='F'))
+    a_re.append(a[i].reshape((n1,n2),order='F'))
+```
+
+```{python}
+cmap_green=colormaps['Greens']
+cmap_orange=colormaps['Oranges']
+cmap_red=colormaps['Reds']
+cmap_blue=colormaps['Blues']
+```
+
+```{python}
+fig,ax=plt.subplots()
+ax1=ax.twinx()
+for i in range(c.shape[0]):
+    ax.plot(c_re[i][125,:],color=cmap_green(i/c.shape[0]))
+ax1.plot(Slice[125,:])
+fig.suptitle('c')
+plt.show()
+
+for i in range(h.shape[0]):
+    plt.plot(h_re[i][125,:],color=cmap_orange(i/c.shape[0]))
+plt.title('h')
+plt.show()
+
+for i in range(n.shape[0]):
+    plt.plot(n_re[i][125,:],color=cmap_red(i/c.shape[0]))
+plt.title('n')
+plt.show()
+
+for i in range(v.shape[0]):
+    plt.plot(v_re[i][125,:],color=cmap_blue(i/c.shape[0]))
+plt.title('v')
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['c','h','n'],['a','v','r']],layout='constrained')
+axs['c'].imshow(c[0].reshape((n1,n2),order='F'))
+axs['h'].imshow(h[0].reshape((n1,n2),order='F'))
+axs['n'].imshow(n[0].reshape((n1,n2),order='F'))
+axs['a'].imshow(a[0].reshape((n1,n2),order='F'))
+axs['v'].imshow(v[0].reshape((n1,n2),order='F'))
+
+axs['r'].set_axis_off()
+
+axs['c'].set_title('c')
+axs['h'].set_title('h')
+axs['n'].set_title('n')
+axs['a'].set_title('a')
+axs['v'].set_title('v')
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['c','h','n'],['a','v','r']],layout='constrained')
+axs['c'].imshow(c[int(c.shape[0]/2)].reshape((n1,n2),order='F'))
+axs['h'].imshow(h[int(c.shape[0]/2)].reshape((n1,n2),order='F'))
+axs['n'].imshow(n[int(c.shape[0]/2)].reshape((n1,n2),order='F'))
+axs['a'].imshow(a[int(c.shape[0]/2)].reshape((n1,n2),order='F'))
+axs['v'].imshow(v[int(c.shape[0]/2)].reshape((n1,n2),order='F'))
+
+axs['r'].set_axis_off()
+
+axs['c'].set_title('c')
+axs['h'].set_title('h')
+axs['n'].set_title('n')
+axs['a'].set_title('a')
+axs['v'].set_title('v')
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['c','h','n'],['a','v','r']],layout='constrained')
+axs['c'].imshow(c[-1].reshape((n1,n2),order='F'))
+axs['h'].imshow(h[-1].reshape((n1,n2),order='F'))
+axs['n'].imshow(n[-1].reshape((n1,n2),order='F'))
+axs['a'].imshow(a[-1].reshape((n1,n2),order='F'))
+axs['v'].imshow(v[-1].reshape((n1,n2),order='F'))
+
+axs['r'].set_axis_off()
+
+axs['c'].set_title('c')
+axs['h'].set_title('h')
+axs['n'].set_title('n')
+axs['a'].set_title('a')
+axs['v'].set_title('v')
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['Norm','Hyp'],['Necr','Vasc']],layout='constrained',figsize=(8,10))
+
+axs['Norm'].set_title('Normoxic Cells',fontsize=20)
+axs['Norm'].set(xticks=[],yticks=[])
+axs['Hyp'].set_title('Hypoxic Cells',fontsize=20)
+axs['Hyp'].set(xticks=[],yticks=[])
+axs['Necr'].set_title('Necrotic Cells',fontsize=20)
+axs['Necr'].set(xticks=[],yticks=[])
+
+ims=[]
+for i in range(c.shape[0]):
+    im_norm=axs['Norm'].pcolormesh(c[i].reshape((n1,n2),order='F').T,cmap=cmap_green,animated=True)
+    im_hyp=axs['Hyp'].pcolormesh(h[i].reshape((n1,n2),order='F').T,cmap=cmap_orange,animated=True)
+    im_necr=axs['Necr'].pcolormesh(n[i].reshape((n1,n2),order='F').T,cmap=cmap_red,animated=True)
+    im_vasc=axs['Vasc'].pcolormesh(v[i].reshape((n1,n2),order='F').T,cmap=cmap_blue,animated=True)
+    ims.append([im_norm,im_hyp,im_necr])
+
+axs['Norm'].pcolormesh(Slice.T,cmap=cmap_bg,alpha=0.5)
+axs['Hyp'].pcolormesh(Slice.T,cmap=cmap_bg,alpha=0.5)
+axs['Necr'].pcolormesh(Slice.T,cmap=cmap_bg,alpha=0.5)
+
+axs['Vasc'].set_axis_off()
+
+anim=animation.ArtistAnimation(fig,ims,blit=True)
+anim.save('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/pihna.mp4')
+
+plt.show()
+```

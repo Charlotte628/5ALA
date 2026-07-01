@@ -1,0 +1,233 @@
+---
+title: ALA 2D Sim
+format: 
+    html: 
+        toc: true
+        lightbox: true
+        code-overflow: wrap
+---
+
+```{python}
+#Import Packages
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import scipy
+import nilearn
+from tqdm import tqdm
+from nilearn import plotting
+from nilearn import image
+import os
+import nibabel as nib
+from matplotlib.colors import Normalize, ListedColormap
+from matplotlib import colormaps
+from matplotlib.animation import FuncAnimation
+from matplotlib import animation
+
+from ALA_2d.diffusion_op import diffusion_op
+from ALA_2d.numerics_2d import numerics_2d, numerical_jacobian_jit,reaction_step
+from ALA_2d.set_interfaces import set_interfaces
+
+from numba import jit
+```
+
+```{python}
+c=pd.read_csv('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/c.csv',header=None)
+c=c.drop(columns=[0])
+c=c.to_numpy()
+
+h=pd.read_csv('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/h.csv',header=None)
+h=h.drop(columns=[0])
+h=h.to_numpy()
+
+n=pd.read_csv('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/n.csv',header=None)
+n=n.drop(columns=[0])
+n=n.to_numpy()
+
+v=pd.read_csv('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/v.csv',header=None)
+v=v.drop(columns=[0])
+v=v.to_numpy()
+```
+
+```{python}
+os.chdir('C:/Users/pmxcb7/OneDrive - The University of Nottingham/Recurrence in GBM/GLISTR')
+#Loading in probabilistic atlas and plotting maps
+CSF=image.smooth_img('IIT_CSF_tissue_prob.nii.gz',fwhm=3)
+WM=image.smooth_img('IIT_WM_tissue_prob.nii.gz',fwhm=3)
+GM=image.smooth_img('IIT_GM_tissue_prob.nii.gz',fwhm=3)
+nilearn.plotting.plot_prob_atlas((CSF,WM,GM),title='IIT Atlas',colorbar=True)
+#Loading probabilistic maps,finding outside the brain and defining slice 
+CSF_load=nib.load('IIT_CSF_tissue_prob.nii.gz').get_fdata()
+WM_load=nib.load('IIT_WM_tissue_prob.nii.gz').get_fdata()
+GM_load=nib.load('IIT_GM_tissue_prob.nii.gz').get_fdata()
+outside_brain=np.zeros((CSF_load.shape))
+for i in range(outside_brain.shape[0]):
+    for j in range(outside_brain.shape[1]):
+        for k in range(outside_brain.shape[2]):
+            if CSF_load[i,j,k]+WM_load[i,j,k]+GM_load[i,j,k]==0:
+                outside_brain[i,j,k]=1
+slice_no=100
+CSF_slice=CSF_load[:,:,slice_no]
+WM_slice=WM_load[:,:,slice_no]
+GM_slice=GM_load[:,:,slice_no]
+OB_slice=outside_brain[:,:,slice_no]
+#plotting slices of probibablistic maps
+fig,axs=plt.subplot_mosaic([['CSF','WM','GM','OB']],layout='constrained')
+axs['CSF'].imshow(CSF_slice)
+axs['WM'].imshow(WM_slice)
+axs['GM'].imshow(GM_slice)
+axs['OB'].imshow(OB_slice)
+plt.show()
+```
+
+```{python}
+slice_atlas=np.zeros((CSF_slice.shape[0],CSF_slice.shape[1]))
+for i in range(slice_atlas.shape[0]):
+    for j in range(slice_atlas.shape[1]):
+        if OB_slice[i,j]==0:
+            slice_atlas[i,j]=np.argmax(np.array([WM_slice[i,j],GM_slice[i,j],CSF_slice[i,j]]))
+        else: 
+            slice_atlas[i,j]=2
+Slice=slice_atlas
+```
+
+```{python}
+P={'R_wg':10,
+    'dt':0.05,
+    'dx':0.01,
+    'D_ao':1e-3,
+    'D_p':1e-3,
+    'k_h':1,
+    'k_c':1,
+    'k_mh':0.1,
+    'k_mc':0.1,
+    'r_h':1,
+    'r_c':0.5,
+    'r_2':1,
+    'k_2':1,
+    'k_m2':0.1,
+    'r_3':0.5
+}
+```
+
+```{python}
+Dweight1,Dweight2,Origin1,Origin2,Terminus1,Terminus2,ind_nz,boundary=set_interfaces(Slice,P)
+```
+
+```{python}
+cmap_bg=ListedColormap(['white','grey','lightblue','black'])
+```
+
+```{python}
+n1,n2=Slice.shape
+ao0=v[-1].reshape((n1,n2),order='F')
+IC={'ao0': ao0,
+    'ah0': np.zeros_like(Slice,dtype=np.float64),
+    'ac0': np.zeros_like(Slice,dtype=np.float64),
+    'p0': np.zeros_like(Slice,dtype=np.float64),
+    'po0': np.zeros_like(Slice,dtype=np.float64),
+    'hi0':np.zeros_like(Slice,dtype=np.float64)}
+```
+
+```{python}
+Simdata = numerics_2d(
+    Dweight1, Dweight2,
+    Origin1, Origin2,
+    Terminus1, Terminus2,
+    n1, n2, ind_nz, boundary,
+    IC, dayspersave=1, t_finish=24,
+    radiussave=0.1, radius_final=1.0,
+    P=P,c=c[-1],h=h[-1])
+```
+
+```{python}
+ao=Simdata['ao']
+ah=Simdata['ah']
+ac=Simdata['ac']
+po=Simdata['po']
+p=Simdata['p']
+hi=Simdata['hi']
+time=Simdata['time']
+```
+
+```{python}
+plt.plot([ah[i].reshape((n1,n2),order='F')[125,75] for i in range(ac.shape[0])])
+plt.plot([ac[i].reshape((n1,n2),order='F')[125,75] for i in range(ac.shape[0])])
+plt.show()
+```
+
+```{python}
+plt.plot([ao[i].reshape((n1,n2),order='F')[125,75] for i in range(ac.shape[0])])
+plt.plot([po[i].reshape((n1,n2),order='F')[125,75] for i in range(ac.shape[0])])
+plt.show()
+```
+
+```{python}
+plt.plot([p[i].reshape((n1,n2),order='F')[125,75] for i in range(ac.shape[0])])
+plt.show()
+```
+
+```{python}
+plt.plot([hi[i].reshape((n1,n2),order='F')[125,75] for i in range(ac.shape[0])])
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['ao','po'],['ah','ac'],['p','hi']],layout='constrained',figsize=(8,14))
+
+axs['ao'].set_title('$A_o$',fontsize=20)
+axs['ao'].set(xticks=[],yticks=[])
+axs['po'].set_title('$P_o$',fontsize=20)
+axs['po'].set(xticks=[],yticks=[])
+axs['ah'].set_title('$A_h$',fontsize=20)
+axs['ah'].set(xticks=[],yticks=[])
+axs['ac'].set_title('$A_c$',fontsize=20)
+axs['ac'].set(xticks=[],yticks=[])
+axs['p'].set_title('$P_i$',fontsize=20)
+axs['p'].set(xticks=[],yticks=[])
+axs['hi'].set_title('$H_i$',fontsize=20)
+axs['hi'].set(xticks=[],yticks=[])
+
+ims=[]
+for i in range(ao.shape[0]):
+    im_ao=axs['ao'].pcolormesh(ao[i].reshape((n1,n2),order='F').T,cmap='Oranges',animated=True)
+    im_po=axs['po'].pcolormesh(po[i].reshape((n1,n2),order='F').T,cmap='Blues',animated=True)
+    im_ah=axs['ah'].pcolormesh(ah[i].reshape((n1,n2),order='F').T,cmap='Oranges',animated=True)
+    im_ac=axs['ac'].pcolormesh(ac[i].reshape((n1,n2),order='F').T,cmap='Greens',animated=True)
+    im_pi=axs['p'].pcolormesh(p[i].reshape((n1,n2),order='F').T,cmap='Blues',animated=True)
+    im_hi=axs['hi'].pcolormesh(hi[i].reshape((n1,n2),order='F').T,cmap='Reds',animated=True)
+    ims.append([im_ao,im_po,im_ah,im_ac,im_pi,im_hi])
+
+axs['ao'].pcolormesh(Slice.T,cmap=cmap_bg,alpha=0.5)
+axs['ah'].pcolormesh(Slice.T,cmap=cmap_bg,alpha=0.5)
+axs['ac'].pcolormesh(Slice.T,cmap=cmap_bg,alpha=0.5)
+axs['p'].pcolormesh(Slice.T,cmap=cmap_bg,alpha=0.5)
+axs['hi'].pcolormesh(Slice.T,cmap=cmap_bg,alpha=0.5)
+axs['po'].pcolormesh(Slice.T,cmap=cmap_bg,alpha=0.5)
+
+
+anim=animation.ArtistAnimation(fig,ims,blit=True)
+anim.save('C:/Users/pmxcb7/OneDrive - The University of Nottingham/PIHNA/ala.mp4')
+
+plt.show()
+```
+
+```{python}
+c_1=c[-1].reshape((n1,n2),order='F')
+h_1=h[-1].reshape((n1,n2),order='F')
+n_1=n[-1].reshape((n1,n2),order='F')
+
+#necrotic is at [125,90]
+#hypoxic is at [115,80]
+#normoxic is at [115,70]
+```
+
+```{python}
+fig,axs=plt.subplots(1,1)
+
+red_line=axs.plot(time,[p[i].reshape((n1,n2),order='F')[125,90] for i in range(p.shape[0])],color='r')
+orange_line=axs.plot(time,[p[i].reshape((n1,n2),order='F')[115,80] for i in range(p.shape[0])],color='orange')
+green_line=axs.plot(time,[p[i].reshape((n1,n2),order='F')[115,70] for i in range(p.shape[0])],color='green')
+
+plt.show()
+```

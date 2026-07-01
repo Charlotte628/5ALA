@@ -1,0 +1,4972 @@
+---
+title: PIHNA 1D
+format:
+    html: 
+        toc: true
+        code-fold: true
+---
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+
+from scipy.integrate import solve_ivp
+from scipy.optimize import fsolve
+
+from tqdm import tqdm
+
+from matplotlib import colormaps
+
+from numba import jit
+```
+
+```{python}
+N=200
+```
+
+```{python}
+def index_helpers(N):
+    #indices of first N mesh points
+    ii=np.arange(0,N,dtype=np.uint64)
+
+    #indices of one mesh point to the left, except at the LH boundary
+    im1=ii-1
+    im1[0]=1
+
+    #indices of one mesh point to the right, except at the RH boundary
+    ip1=ii+1
+    ip1[-1]=N-2
+
+    #indices of all mesh points and an extra index at the RH boundary
+    iip=np.arange(0,N+1,dtype=np.uint64)
+    iip[-1]=N-2
+
+    #indices of one mesh point to the left, except at the LH boundary
+    ipre=np.arange(0,N+1,dtype=np.uint64)
+    ipre=ipre-1
+    ipre[0]=1
+
+    return ii,im1,ip1,iip,ipre
+```
+
+```{python}
+def pinha1d_central(t,z):
+    c=z[0:N]
+    h=z[N:2*N]
+    n=z[2*N:3*N]
+    v=z[3*N:4*N]
+    a=z[4*N:]
+    T=(c+h+n+v)/K
+    if np.sum(v)==0 and np.sum(c)==0 and np.sum(h)==0:
+        V=np.zeros(N)
+    else:
+        #V=v/(v+c+h)
+        V=v/(v+(P_c*c+P_h*h)/((u0/v0)-1))
+
+    D_fun=(2-T[ipre]-T[iip])/2
+    dcdx=(c[iip]-c[ipre])/(dx**2)
+    dhdx=(h[iip]-h[ipre])/(dx**2)
+    dvdx=(v[iip]-v[ipre])/(dx**2)
+    dadx=(a[im1]-2*a[ii]+a[ip1])/(dx**2)
+    c_spatial=D_c*(D_fun[ii+1]*dcdx[ii+1]-D_fun[ii]*dcdx[ii])
+    h_spatial=D_h*(D_fun[ii+1]*dhdx[ii+1]-D_fun[ii]*dhdx[ii])
+    v_spatial=D_v*(D_fun[ii+1]*dvdx[ii+1]-D_fun[ii]*dvdx[ii])
+    a_spatial=D_a*dadx
+    #-q*mu*(a/(K_m+a))*v*(1-T)-omega*a*v-lamb*a
+
+    return np.concatenate((c_spatial+rho*c*(1-T)+gamma*h*V-beta*c*(1-V)-alpha_n*n*c/K,h_spatial-gamma*h*V+beta*c*(1-V)-(alpha_h*h*(1-V)+alpha_n*n*h/K),alpha_h*h*(1-V)+alpha_n*n*(c+h+v)/K,v_spatial+mu*(a/(K_m+a))*v*(1-T)-alpha_n*n*v/K,a_spatial+delta_c*c+delta_h*h-q*mu*(a/(K_m+a))*v*(1-T)-omega*a*v-lamb*a))
+```
+
+```{python}
+def ala_central(t,z):
+    ao=z[0:N]
+    ah=z[N:2*N]
+    ac=z[2*N:3*N]
+    p=z[3*N:4*N]
+    po=z[4*N:5*N]
+    hi=z[5*N:]
+
+    daodx=(ao[im1]-2*ao[ii]+ao[ip1])/(dx**2)
+    dpodx=(po[im1]-2*po[ii]+po[ip1])/(dx**2)
+    ao_spatial=D_ao*daodx
+    po_spatial=D_po*dpodx
+
+    return np.concatenate((ao_spatial-k_h*h*ao-k_c*c*ao+k_mh*ah+k_mc*ac,k_h*h*ao-r_h*ah-k_mh*ah,k_c*c*ao-r_c*ac-k_mc*ac,r_h*ah+r_c*ac-r_2*p-k_m2*p+k_2*(c+h)*po,po_spatial+k_m2*p-k_2*(c+h)*po,r_2*p-r_3*hi))
+```
+
+# Simulations
+
+## Initial Simulation
+
+### Parameters
+
+| Parameter | Value | Units |
+|----|----|----|
+| $D_c$ | 1/365 | $\text{mm}^2 /\text{day}$ |
+| $D_h$ | 0.1 $D_c$ | $\text{mm}^2 /\text{day}$ |
+| $D_v$ | 0.18/365 | $\text{mm}^2 /\text{day}$ |
+| $D_a$ | 3.15/365 | $\text{mm}^2 /\text{day}$ |
+| $\rho$ | 10/365 | 1/day |
+| $\beta$ | 0.1 $\rho$ | 1/day |
+| $\gamma$ | 0.05 | 1/day |
+| $\alpha_h$ | 0.1 $\beta$ | 1/day |
+| $\alpha_n$ | log(2)/50 | 1/day |
+| $\delta_c$ | $(2.77\times 10^{-13})/365$ | $\frac{\mu \text{mol}}{\text{cell} \times \text{day}}$ |
+| $\delta_h$ | $(5.22\times 10^{-10})/365$ | $\frac{\mu \text{mol}}{\text{cell} \times \text{day}}$ |
+| $\mu$ | log(2)/15 | 1/day |
+| q | 1.66 | $\frac{\mu \text{mol}}{\text{cell}}$ |
+| $\lambda$ | 15.6 | 1/day |
+| $\omega$ | $\lambda$/$v_0$ | $\frac{1}{\text{cell}\times\text{day}}$ |
+| K | $2.4\times 10^8$ | cells |
+| $P_c$ | 1.66 |  |
+| $P_h$ | 1.66 |  |
+| $v_0$ | 0.1K | cells |
+| $u_0$ | K | cells |
+
+```{python}
+D_c=1/365
+rho=10/365
+gamma=0.05
+alpha_n=np.log(2)/50
+D_h=0.1*D_c
+beta=3*rho#0.5*rho
+alpha_h=0.05*beta
+D_v=0.18/365
+D_a=3.15/365
+delta_c=(2.77e-13)/365
+q=1.66e-4
+lamb=15.6
+delta_h=(5.22e-10)/365
+mu=np.log(2)/15
+K=1#2.4e8
+v0=0.1*K
+u0=K
+omega=lamb/v0
+L=101
+P_c=1.6
+P_h=1.6
+K_m=1
+
+D_ao=1/100
+k_h=1
+k_c=1
+k_mc=0.1
+k_mh=0.1
+r_h=0.5
+r_c=1
+r_2=0.75
+k_2=1
+k_m2=0.1
+D_po=1/100
+r_3=0.5
+```
+
+```{python}
+tmax=730
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/0.1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 365')
+axs['Day 730'].set(title='Day 730')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 0'].legend(handles=custom_lines)
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+```
+
+```{python}
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['ao','po'],['ah','ac'],['p','hi']],layout='constrained')
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+plt.show()
+```
+
+```{python}
+p=sol_ala.y[3*N:4*N]
+```
+
+```{python}
+resect_p1=np.zeros(p.shape[1])
+resect_p2=np.zeros(p.shape[1])
+resect_p3=np.zeros(p.shape[1])
+resect_p4=np.zeros(p.shape[1])
+for i in range(p.shape[1]):
+    pi=p[:,i]
+    resect_p1[i]=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[pi>=0.000001])-np.sum(h[pi>=0.000001])-np.sum(n[pi>=0.000001])
+    resect_p2[i]=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[pi>=0.00001])-np.sum(h[pi>=0.00001])-np.sum(n[pi>=0.00001])
+    resect_p3[i]=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[pi>=0.0001])-np.sum(h[pi>=0.0001])-np.sum(n[pi>=0.0001])
+    resect_p4[i]=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[pi>=0.001])-np.sum(h[pi>=0.001])-np.sum(n[pi>=0.001])
+```
+
+```{python}
+resect_flair=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[(c+h+n)>=0.16]+h[(c+h+n)>=0.16]+n[(c+h+n)>=0.16])
+resect_t1gd=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[(c+h+n)>=0.8]+h[(c+h+n)>=0.8]+n[(c+h+n)>=0.8])
+p1_min=np.argmin(resect_p1)
+p2_min=np.argmin(resect_p2)
+p3_min=np.argmin(resect_p3)
+p4_min=np.argmin(resect_p4)
+p1_max=p1_min
+p2_max=p2_min
+p3_max=p3_min
+p4_max=p4_min
+for i in range(p1_min,resect_p1.shape[0]):
+    if resect_p1[i]<resect_p1[p1_min]+1:
+        p1_max=i
+    else:
+        break
+for i in range(p2_min,resect_p2.shape[0]):
+    if resect_p2[i]<resect_p2[p2_min]+1:
+        p2_max=i
+    else:
+        break
+for i in range(p3_min,resect_p3.shape[0]):
+    if resect_p3[i]<resect_p3[p3_min]+1:
+        p3_max=i
+    else:
+        break
+for i in range(p4_min,resect_p4.shape[0]):
+    if resect_p4[i]<resect_p4[p4_min]+1:
+        p4_max=i
+    else:
+        break
+```
+
+```{python}
+plt.plot([0.1,0.1],[t_eval[p1_min],t_eval[p1_max]],color='red')
+plt.scatter(0.1,t_eval[p1_min],color='blue',zorder=10)
+plt.scatter(0.1,t_eval[p1_max],color='purple',zorder=10)
+plt.plot([0.2,0.2],[t_eval[p2_min],t_eval[p2_max]],color='orange')
+plt.scatter(0.2,t_eval[p2_min],color='blue',zorder=10)
+plt.scatter(0.2,t_eval[p2_max],color='purple',zorder=10)
+plt.plot([0.3,0.3],[t_eval[p3_min],t_eval[p3_max]],color='gold')
+plt.scatter(0.3,t_eval[p3_min],color='blue',zorder=10)
+plt.scatter(0.3,t_eval[p3_max],color='purple',zorder=10)
+plt.plot([0.4,0.4],[t_eval[p4_min],t_eval[p4_max]],color='green')
+plt.scatter(0.4,t_eval[p4_min],color='blue',zorder=10)
+plt.scatter(0.4,t_eval[p4_max],color='purple',zorder=10)
+
+plt.xticks(ticks=[0.1,0.2,0.3,0.4],labels=['1e-6','1e-5','1e-4','1e-3'])
+custom_lines=[Line2D([0],[0],marker='o',color='w',markerfacecolor='blue',label='First Optimal Time'),Line2D([0],[0],marker='o',color='w',markerfacecolor='purple',label='Final Optimal Time')]
+plt.legend(handles=custom_lines)
+plt.ylabel('Time')
+plt.xlabel('Fluorescence Threshold')
+plt.title('Optimal Resection Time')
+plt.show()
+```
+
+```{python}
+plt.plot(resect_p1,color='red')
+plt.plot(resect_p2,color='orange')
+plt.plot(resect_p3,color='gold')
+plt.plot(resect_p4,color='green')
+plt.axhline(resect_flair,color='black',linestyle='--')
+plt.axhline(resect_t1gd,color='grey',linestyle='--')
+plt.xticks(ticks=[0,10,20,30,40,50],labels=[0,5,10,15,20,25])
+plt.xlabel('t (Hours)')
+plt.ylabel('Number of remaining\ntumour cells')
+custom_lines=[Line2D([0],[0],color='red',label='p>1e-6'),Line2D([0],[0],color='orange',label='p>1e-5'),Line2D([0],[0],color='gold',label='p>1e-4'),Line2D([0],[0],color='green',label='p>1e-3')]
+plt.legend(handles=custom_lines)
+plt.show()
+```
+
+## Diffusion ($D_c$)
+
+```{python}
+D_cs=[0.1/365,0.5/365,1/365,1.5/365,2/365,2.5/365,3/365,3.5/365,4/365,4.5/365,5/365,5.5/365,6/365,6.5/365,7/365,7.5/365,8/365,8.5/365,9/365,9.5/365,10/365]
+```
+
+```{python}
+Dc_sols=[]
+for i in tqdm(range(len(D_cs))):
+    tmax=730
+    nplots=51
+
+    D_c=D_cs[i]
+    D_h=0.1*D_c
+
+    ii,im1,ip1,iip,ipre=index_helpers(N)
+    dx=L/(N-1)
+
+    xx=np.linspace(0,L,N)
+    tspan=[0,tmax]
+    t_eval=np.linspace(0,tmax,nplots)
+    rng=np.random.default_rng(1)
+
+    c0=0.25*K*np.exp(-(xx-L/2)**2/0.1**2)
+    h0=np.zeros(N,dtype=np.float64)
+    n0=np.zeros(N,dtype=np.float64)
+    v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+    a0=np.zeros(N,dtype=np.float64)
+
+    z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+    sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+    print(f'RK45 Solving succesful: {sol_pihna.success}')
+    Dc_sols.append(sol_pihna)
+```
+
+```{python}
+ala_Dc_sols=[]
+flair_resects=np.zeros(len(Dc_sols))
+t1gd_resects=np.zeros(len(Dc_sols))
+for i in range(len(Dc_sols)):
+    sol=Dc_sols[i]
+    c=sol.y[0:N,-1]
+    h=sol.y[N:2*N,-1]
+    n=sol.y[2*N:3*N,-1]
+    v=sol.y[3*N:4*N,-1]
+    a=sol.y[4*N:,-1]
+    resect_flair=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[(c+h+n)>=0.16]+h[(c+h+n)>=0.16]+n[(c+h+n)>=0.16])
+    resect_t1gd=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[(c+h+n)>=0.8]+h[(c+h+n)>=0.8]+n[(c+h+n)>=0.8])
+    flair_resects[i]=resect_flair
+    t1gd_resects[i]=resect_t1gd
+    tmax=24
+    nplots=51
+
+    ii,im1,ip1,iip,ipre=index_helpers(N)
+    dx=L/(N-1)
+
+    xx=np.linspace(0,L,N)
+    tspan=[0,tmax]
+    t_eval=np.linspace(0,tmax,nplots)
+    rng=np.random.default_rng(1)
+
+    a0=0.5*v
+    ah0=np.zeros(N,dtype=np.float64)
+    ac0=np.zeros(N,dtype=np.float64)
+    p0=np.zeros(N,dtype=np.float64)
+    po0=np.zeros(N,dtype=np.float64)
+    hi0=np.zeros(N,dtype=np.float64)
+
+    z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+    sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+    print(f'RK45 Solving succesful: {sol_pihna.success}')
+    ala_Dc_sols.append(sol_ala)
+```
+
+```{python}
+p_resects=[]
+p_min=[]
+p_max=[]
+for j in range(len(ala_Dc_sols)):
+    sol=ala_Dc_sols[j]
+    p=sol.y[3*N:4*N]
+    resect_p=np.zeros(p.shape[1])
+    for i in range(p.shape[1]):
+        pi=p[:,i]
+        resect_p[i]=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[pi>=0.00001])-np.sum(h[pi>=0.00001])-np.sum(n[pi>=0.00001])
+    p_resects.append(resect_p)
+    pmin=np.argmin(resect_p)
+    pmax=pmin
+    for i in range(pmin,resect_p.shape[0]):
+        if resect_p[i]<resect_p[pmin]+1:
+            pmax=i
+        else:
+            break
+    p_min.append(t_eval[pmin])
+    p_max.append(t_eval[pmax])
+```
+
+```{python}
+cmap=colormaps['rainbow']
+```
+
+```{python}
+plt.scatter([0.1*i for i in range(len(p_min))],p_min,color='blue',zorder=10)
+plt.scatter([0.1*i for i in range(len(p_max))],p_max,color='purple',zorder=10)
+for i in range(len(p_min)):
+    plt.plot([0.1*i,0.1*i],[p_min[i],p_max[i]],color=cmap(i/len(p_min)))
+plt.xticks(ticks=[0,0.5,1,1.5,2],labels=['1/3650','5/730','5/365','15/730','10/365'])
+plt.xlabel('$D_c$')
+plt.ylabel('Time')
+plt.title('Optimal Resection Time')
+plt.show()
+```
+
+```{python}
+for i in range(len(p_resects)):
+    plt.plot(p_resects[i],color=cmap(i/(len(p_min))))
+plt.xticks(ticks=[0,10,20,30,40,50],labels=[0,5,10,15,20,25])
+plt.xlabel('t (Hours)')
+plt.ylabel('Number of cells\nremaining')
+plt.show()
+```
+
+```{python}
+for i in range(len(p_resects)):
+    plt.scatter(0.1*i,np.min(p_resects[i]),color=cmap(i/len(p_min)),zorder=10)
+plt.plot([0.1*i for i in range(len(p_resects))],[np.min(p_resects[i]) for i in range(len(p_resects))],color='grey',linestyle='--')
+plt.xticks(ticks=[0,0.5,1,1.5,2],labels=['1/3650','5/730','5/365','15/730','10/365'])
+plt.xlabel('$D_c$')
+plt.ylabel('Optimal Resection Achieved')
+plt.show()
+```
+
+```{python}
+rhos=np.arange(0,5.25,0.25)
+```
+
+```{python}
+rho_sols=[]
+for i in tqdm(range(len(rhos))):
+    tmax=730
+    nplots=51
+
+    D_c=D_cs[i]
+    D_h=0.1*D_c
+    rho=rhos[i]
+    beta=3*rho
+    alpha_h=0.05*beta
+
+    ii,im1,ip1,iip,ipre=index_helpers(N)
+    dx=L/(N-1)
+
+    xx=np.linspace(0,L,N)
+    tspan=[0,tmax]
+    t_eval=np.linspace(0,tmax,nplots)
+    rng=np.random.default_rng(1)
+
+    c0=0.25*K*np.exp(-(xx-L/2)**2/0.1**2)
+    h0=np.zeros(N,dtype=np.float64)
+    n0=np.zeros(N,dtype=np.float64)
+    v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+    a0=np.zeros(N,dtype=np.float64)
+
+    z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+    sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+    print(f'RK45 Solving succesful: {sol_pihna.success}')
+    rho_sols.append(sol_pihna)
+```
+
+```{python}
+ala_rho_sols=[]
+flair_resects_rho=np.zeros(len(rho_sols))
+t1gd_resects_rho=np.zeros(len(rho_sols))
+for i in range(len(rho_sols)):
+    sol=rho_sols[i]
+    c=sol.y[0:N,-1]
+    h=sol.y[N:2*N,-1]
+    n=sol.y[2*N:3*N,-1]
+    v=sol.y[3*N:4*N,-1]
+    a=sol.y[4*N:,-1]
+    resect_flair=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[(c+h+n)>=0.16]+h[(c+h+n)>=0.16]+n[(c+h+n)>=0.16])
+    resect_t1gd=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[(c+h+n)>=0.8]+h[(c+h+n)>=0.8]+n[(c+h+n)>=0.8])
+    flair_resects_rho[i]=resect_flair
+    t1gd_resects_rho[i]=resect_t1gd
+    tmax=24
+    nplots=51
+
+    ii,im1,ip1,iip,ipre=index_helpers(N)
+    dx=L/(N-1)
+
+    xx=np.linspace(0,L,N)
+    tspan=[0,tmax]
+    t_eval=np.linspace(0,tmax,nplots)
+    rng=np.random.default_rng(1)
+
+    a0=0.5*v
+    ah0=np.zeros(N,dtype=np.float64)
+    ac0=np.zeros(N,dtype=np.float64)
+    p0=np.zeros(N,dtype=np.float64)
+    po0=np.zeros(N,dtype=np.float64)
+    hi0=np.zeros(N,dtype=np.float64)
+
+    z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+    sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+    print(f'RK45 Solving succesful: {sol_pihna.success}')
+    ala_rho_sols.append(sol_ala)
+```
+
+```{python}
+p_resects_rho=[]
+p_min_rho=[]
+p_max_rho=[]
+for j in range(len(ala_rho_sols)):
+    sol=ala_rho_sols[j]
+    p=sol.y[3*N:4*N]
+    resect_p=np.zeros(p.shape[1])
+    for i in range(p.shape[1]):
+        pi=p[:,i]
+        resect_p[i]=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[pi>=0.00001])-np.sum(h[pi>=0.00001])-np.sum(n[pi>=0.00001])
+    p_resects.append(resect_p)
+    pmin=np.argmin(resect_p)
+    pmax=pmin
+    for i in range(pmin,resect_p.shape[0]):
+        if resect_p[i]<resect_p[pmin]+1:
+            pmax=i
+        else:
+            break
+    p_min.append(t_eval[pmin])
+    p_max.append(t_eval[pmax])
+```
+
+```{python}
+cmap=colormaps['rainbow']
+```
+
+```{python}
+plt.scatter([0.1*i for i in range(len(p_min))],p_min,color='blue',zorder=10)
+plt.scatter([0.1*i for i in range(len(p_max))],p_max,color='purple',zorder=10)
+for i in range(len(p_min)):
+    plt.plot([0.1*i,0.1*i],[p_min[i],p_max[i]],color=cmap(i/len(p_min)))
+#plt.xticks(ticks=[0,0.5,1,1.5,2],labels=['1/3650','5/730','5/365','15/730','10/365'])
+plt.xlabel(r'$\rho$')
+plt.ylabel('Time')
+plt.title('Optimal Resection Time')
+plt.show()
+```
+
+```{python}
+for i in range(len(p_resects)):
+    plt.plot(p_resects[i],color=cmap(i/(len(p_min))))
+plt.xticks(ticks=[0,10,20,30,40,50],labels=[0,5,10,15,20,25])
+plt.xlabel('t (Hours)')
+plt.ylabel('Number of cells remaining')
+plt.show()
+```
+
+```{python}
+for i in range(len(p_resects)):
+    plt.scatter(0.1*i,np.min(p_resects[i]),color=cmap(i/len(p_min)),zorder=10)
+plt.plot([0.1*i for i in range(len(p_resects))],[np.min(p_resects[i]) for i in range(len(p_resects))],color='grey',linestyle='--')
+#plt.xticks(ticks=[0,0.5,1,1.5,2],labels=['1/3650','5/730','5/365','15/730','10/365'])
+plt.xlabel(r'$\rho$')
+plt.ylabel('Optimal Resection Achieved')
+plt.show()
+```
+
+# D and rho
+
+```{python}
+sols=[]
+for i in tqdm(range(len(D_cs))):
+    sols_Dc=[]
+    for j in range(len(rhos)):
+        tmax=730
+        nplots=51
+
+        D_c=D_cs[i]
+        D_h=0.1*D_c
+        rho=rhos[j]
+        beta=3*rho
+        alpha_h=0.05*beta
+
+        ii,im1,ip1,iip,ipre=index_helpers(N)
+        dx=L/(N-1)
+
+        xx=np.linspace(0,L,N)
+        tspan=[0,tmax]
+        t_eval=np.linspace(0,tmax,nplots)
+        rng=np.random.default_rng(1)
+
+        c0=0.25*K*np.exp(-(xx-L/2)**2/0.1**2)
+        h0=np.zeros(N,dtype=np.float64)
+        n0=np.zeros(N,dtype=np.float64)
+        v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+        a0=np.zeros(N,dtype=np.float64)
+
+        z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+        sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+        print(f'RK45 Solving succesful: {sol_pihna.success}')
+        sols_Dc.append(sol_pihna)
+    sols.append(sols_Dc)
+```
+
+```{python}
+ala_sols=[]
+flair_resects_1=np.zeros((len(sols),len(sols[0])))
+t1gd_resects_1=np.zeros((len(sols),len(sols[0])))
+for i in tqdm(range(len(sols))):
+    sols_ala_Dc=[]
+    for j in range(len(sols[i])):
+        sol=sols[i][j]
+        c=sol.y[0:N,-1]
+        h=sol.y[N:2*N,-1]
+        n=sol.y[2*N:3*N,-1]
+        v=sol.y[3*N:4*N,-1]
+        a=sol.y[4*N:,-1]
+        resect_flair=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[(c+h+n)>=0.16]+h[(c+h+n)>=0.16]+n[(c+h+n)>=0.16])
+        resect_t1gd=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[(c+h+n)>=0.8]+h[(c+h+n)>=0.8]+n[(c+h+n)>=0.8])
+        flair_resects_1[i,j]=resect_flair
+        t1gd_resects_1[i,j]=resect_t1gd
+        tmax=24
+        nplots=51
+
+        ii,im1,ip1,iip,ipre=index_helpers(N)
+        dx=L/(N-1)
+
+        xx=np.linspace(0,L,N)
+        tspan=[0,tmax]
+        t_eval=np.linspace(0,tmax,nplots)
+        rng=np.random.default_rng(1)
+
+        a0=0.5*v
+        ah0=np.zeros(N,dtype=np.float64)
+        ac0=np.zeros(N,dtype=np.float64)
+        p0=np.zeros(N,dtype=np.float64)
+        po0=np.zeros(N,dtype=np.float64)
+        hi0=np.zeros(N,dtype=np.float64)
+
+        z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+        sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+        print(f'RK45 Solving succesful: {sol_pihna.success}')
+        sols_ala_Dc.append(sol_ala)
+    ala_sols.append(sols_ala_Dc)
+```
+
+```{python}
+p_resects=[]
+p_min,p_max=np.zeros((len(ala_sols),len(ala_sols[0]))),np.zeros((len(ala_sols),len(ala_sols[0])))
+for i in range(len(ala_sols)):
+    p_ala_resect=[]
+    for j in range(len(ala_sols[0])):
+        sol=ala_sols[i][j]
+        tum_sol=sols[i][j]
+        c=tum_sol.y[0:N,-1]
+        h=tum_sol.y[N:2*N,-1]
+        n=tum_sol.y[2*N:3*N,-1]
+        v=tum_sol.y[3*N:4*N,-1]
+        a=tum_sol.y[4*N:,-1]       
+        p=sol.y[3*N:4*N]
+        resect_p=np.zeros(p.shape[0])
+        for k in range(p.shape[0]):
+            pk=p[:,k]
+            resect_p[k]=np.sum(c)+np.sum(h)+np.sum(n)-np.sum(c[pk>=0.00001])-np.sum(h[pk>=0.00001])-np.sum(n[pk>=0.00001])
+        p_ala_resect.append(resect_p)
+        pmin=np.argmin(resect_p)
+        pmax=pmin
+        for k in range(pmin,resect_p.shape[0]):
+            if resect_p[k]<resect_p[pmin]+1:
+                pmax=k
+            else:
+                break
+        p_min[i,j]=t_eval[pmin]
+        p_max[i,j]=t_eval[pmax]
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['flair','t1gd']],layout='constrained')
+axs['flair'].imshow(flair_resects_1[:,1:])
+axs['t1gd'].imshow(t1gd_resects_1[:,1:])
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['pmin','pmax']],layout='constrained')
+axs['pmin'].imshow(p_min,cmap=cmap)
+axs['pmax'].imshow(p_max,cmap=cmap)
+plt.show()
+```
+
+```{python}
+plt.imshow(p_max-p_min,cmap=cmap)
+plt.colorbar()
+plt.show()
+```
+
+## Simulations - pihna params
+
+```{python}
+L=100
+```
+
+```{python}
+D_c=1/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_c=1/365$')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_c=1/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=2/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_c=2/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_c=2/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=5/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_c=5/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_c=5/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_c=10/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_c=10/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=50/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_c=50/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_c=50/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=100/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 0'].legend(handles=custom_lines)
+fig.suptitle('$D_c=100/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_c=100/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### D_h_mul
+
+```{python}
+D_c=10/365
+D_h=0.1*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_h=0.1D_c$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_h=0.1D_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=1*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_h=D_c$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_h=D_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=2*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_h=2D_c$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_h=2D_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=5*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_h=5D_c$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_h=5D_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_h=10D_c$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_h=10D_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=100*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle('$D_h=100D_c$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$D_h=100D_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### rho
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=1/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle(r'$\rho=1/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle(r'$\rho=1/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle(r'$\rho=10/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle(r'$\rho=10/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=5/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle(r'$\rho=5/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle(r'$\rho=5/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=15/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle(r'$\rho=15/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle(r'$\rho=15/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=20/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle(r'$\rho=20/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle(r'$\rho=20/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=50/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle(r'$\rho=50/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle(r'$\rho=50/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=100/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+fig.suptitle(r'$\rho=100/365$')
+
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle(r'$\rho=100/365$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+## Simulations - ala params
+
+Tumour Simulation - $D_c=10/365, D_h=10D_c, \rho=10/365$
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+
+plt.show()
+```
+
+### initial 5-ala amount
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$a_o(0)=0.1v(365)$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=0.5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$a_o(0)=0.5v(365)$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$a_o(0)=v(365)$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=5*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$a_o(0)=5v(365)$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=10*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$a_o(0)=10v(365)$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+a0=100*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$a_o(0)=100v(365)$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### $r_c$
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=0.1
+r_h=0.5*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_c=0.1$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=0.5
+r_h=0.5*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_c=0.5$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=1
+r_h=0.5*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_c=1$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=2
+r_h=0.5*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_c=2$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=5
+r_h=0.5*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_c=5$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=10
+r_h=0.5*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_c=10$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### gamma - $r_c/r_h$
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=1
+r_h=0.1*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_h=0.1r_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=1
+r_h=0.5*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_h=0.5r_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=1
+r_h=1*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_h=r_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=0.1
+r_h=2*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_h=2r_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+p=sol_ala.y[3*N:4*N]
+```
+
+```{python}
+fig,axs=plt.subplots()
+axs1=axs.twinx()
+axs1.set(ylim=(0,1),yticks=[])
+axs1.axhspan(0,c[100],alpha=0.3,color='green')
+axs1.axhspan(c[100],h[100]+c[100],alpha=0.3,color='orange')
+axs1.axhspan(h[100]+c[100],n[100]+h[100]+c[100],alpha=0.3,color='red')
+
+axs.plot(t_eval,p[100,:],color='blue')
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots()
+axs1=axs.twinx()
+axs1.set(ylim=(0,1),yticks=[])
+axs1.axhspan(0,c[100],alpha=0.3,color='green')
+axs1.axhspan(c[100],h[100]+c[100],alpha=0.3,color='orange')
+axs1.axhspan(h[100]+c[100],n[100]+h[100]+c[100],alpha=0.3,color='red')
+
+axs.plot(t_eval,p[100,:],color='blue')
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots()
+axs1=axs.twinx()
+axs1.set(ylim=(0,1),yticks=[])
+axs1.axhspan(0,c[75],alpha=0.3,color='green')
+axs1.axhspan(c[75],h[75]+c[75],alpha=0.3,color='orange')
+axs1.axhspan(h[75]+c[75],n[75]+h[75]+c[75],alpha=0.3,color='red')
+
+axs.plot(t_eval,p[75,:],color='blue')
+
+plt.show()
+```
+
+# Figures
+
+## PIHNA simulation plots
+
+```{python}
+D_c=10/365
+D_h=10*D_c
+rho=10/365
+tmax=365
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+
+c0=0.25*K*np.exp(-(xx-L/2)**2/1**2)
+h0=np.zeros(N,dtype=np.float64)
+n0=np.zeros(N,dtype=np.float64)
+v0=np.full(N,0.03*K,dtype=np.float64)#K*np.exp(-(xx-L/2)**2/0.1**2)
+a0=np.zeros(N,dtype=np.float64)
+
+z0_pihna=np.concatenate((c0,h0,n0,v0,a0))
+sol_pihna=solve_ivp(pinha1d_central,tspan,z0_pihna,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['Day 0', 'Day 365', 'Day 730']],layout='constrained',figsize=(12,4))
+axs['Day 0'].plot(xx,sol_pihna.y[0:N,0],color='green')
+axs['Day 0'].plot(xx,sol_pihna.y[N:2*N,0],color='orange')
+axs['Day 0'].plot(xx,sol_pihna.y[2*N:3*N,0],color='red')
+
+axs['Day 365'].plot(xx,sol_pihna.y[0:N,25],color='green')
+axs['Day 365'].plot(xx,sol_pihna.y[N:2*N,25],color='orange')
+axs['Day 365'].plot(xx,sol_pihna.y[2*N:3*N,25],color='red')
+
+axs['Day 730'].plot(xx,sol_pihna.y[0:N,-2],color='green')
+axs['Day 730'].plot(xx,sol_pihna.y[N:2*N,-2],color='orange')
+axs['Day 730'].plot(xx,sol_pihna.y[2*N:3*N,-2],color='red')
+
+axs['Day 0'].set(title='Day 0')
+axs['Day 365'].set(title='Day 182')
+axs['Day 730'].set(title='Day 365')
+
+custom_lines=[Line2D([0],[0],color='red',label='Necrotic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='green',label='Normoxic')]
+axs['Day 730'].legend(handles=custom_lines)
+
+plt.show()
+```
+
+### Animation 
+
+```{python}
+fig,ax=plt.subplots()
+
+green_line=ax.plot(xx,sol_pihna.y[0:N,0],color='green')[0]
+orange_line=ax.plot(xx,sol_pihna.y[N:2*N,0],color='orange')[0]
+red_line=ax.plot(xx,sol_pihna.y[2*N:3*N,0],color='red')[0]
+ax.set(ylim=(0,0.4))
+ax.set(xlabel='t (Hours)',ylabel='Cells')
+
+def update(frame):
+    y_green=sol_pihna.y[0:N,frame]
+    y_orange=sol_pihna.y[N:2*N,frame]
+    y_red=sol_pihna.y[2*N:3*N,frame]
+    green_line.set_ydata(y_green)
+    orange_line.set_ydata(y_orange)
+    red_line.set_ydata(y_red)
+    return (green_line,orange_line,red_line)
+
+ani=animation.FuncAnimation(fig=fig,func=update,frames=nplots,interval=250)
+ani.save('pihna_1d.mp4')
+plt.show()
+```
+
+## ALA simulation plots
+```{python}
+c=sol_pihna.y[0:N,-1]
+h=sol_pihna.y[N:2*N,-1]
+n=sol_pihna.y[2*N:3*N,-1]
+v=sol_pihna.y[3*N:4*N,-1]
+a=sol_pihna.y[4*N:,-1]
+
+tmax=24
+nplots=51
+
+ii,im1,ip1,iip,ipre=index_helpers(N)
+dx=L/(N-1)
+
+xx=np.linspace(0,L,N)
+tspan=[0,tmax]
+t_eval=np.linspace(0,tmax,nplots)
+rng=np.random.default_rng(1)
+r_c=1
+r_h=0.5*r_c
+
+a0=0.1*v
+ah0=np.zeros(N,dtype=np.float64)
+ac0=np.zeros(N,dtype=np.float64)
+p0=np.zeros(N,dtype=np.float64)
+po0=np.zeros(N,dtype=np.float64)
+hi0=np.zeros(N,dtype=np.float64)
+
+z0_ala=np.concatenate((a0,ah0,ac0,p0,po0,hi0))
+sol_ala=solve_ivp(ala_central,tspan,z0_ala,t_eval=t_eval,method='RK45')
+print(f'RK45 Solving succesful: {sol_pihna.success}')
+
+fig,axs=plt.subplot_mosaic([['ao','po','ah'],['p','hi','ac']],layout='constrained',figsize=(8,4))
+
+axs['ao'].plot(xx,sol_ala.y[0:N,0],color='orange',linestyle='--')
+axs['ao'].plot(xx,sol_ala.y[0:N,25],color='orange',linestyle='-.')
+axs['ao'].plot(xx,sol_ala.y[0:N,-1],color='orange')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,0],color='blue',linestyle='--')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,25],color='blue',linestyle='-.')
+axs['po'].plot(xx,sol_ala.y[4*N:5*N,-1],color='blue')
+axs['ao'].set_title('5-ALA - Outside Cell')
+axs['po'].set_title('PpIX - Outside Cell')
+
+axs['ah'].plot(xx,sol_ala.y[N:2*N,0],color='orange',linestyle='--')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,25],color='orange',linestyle='-.')
+axs['ah'].plot(xx,sol_ala.y[N:2*N,-1],color='orange')
+
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,0],color='green',linestyle='--')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,25],color='green',linestyle='-.')
+axs['ac'].plot(xx,sol_ala.y[2*N:3*N,-1],color='green')
+
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+axs['p'].plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+
+axs['hi'].plot(xx,sol_ala.y[5*N:,0],color='red',linestyle='--')
+axs['hi'].plot(xx,sol_ala.y[5*N:,25],color='red',linestyle='-.')
+axs['hi'].plot(xx,sol_ala.y[5*N:,-1],color='red')
+
+axs['ah'].set_title('5-ALA - Inside Hypoxic')
+axs['ac'].set_title('5-ALA - Inside Normoxic')
+axs['p'].set_title('PpIX - Inside')
+axs['hi'].set_title('Heme - Inside')
+
+axs['ao'].set(xticks=[])
+axs['po'].set(xticks=[])
+axs['ah'].set(xticks=[])
+
+fig.suptitle('$r_h=0.5r_c$')
+
+plt.show()
+
+plt.plot(xx,sol_ala.y[3*N:4*N,0],color='blue',linestyle='--')
+plt.plot(xx,sol_ala.y[3*N:4*N,25],color='blue',linestyle='-.')
+plt.plot(xx,sol_ala.y[3*N:4*N,-1],color='blue')
+custom_lines_ala=[Line2D([0],[0],color='blue',linestyle='--',label='Hour 0'),Line2D([0],[0],color='blue',linestyle='-.',label='Hour 12'),Line2D([0],[0],color='blue',label='Hour 24')]
+plt.legend(handles=custom_lines_ala)
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+p=sol_ala.y[3*N:4*N]
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['sims','sims'],['f','s']],layout='constrained',figsize=(10,6))
+
+axs['sims'].plot(xx,c,color='green')
+axs['sims'].plot(xx,h,color='orange')
+axs['sims'].plot(xx,n,color='red')
+
+axs['sims'].axvline(xx[50],color='purple',linestyle='--')
+axs['sims'].axvline(xx[75],color='magenta',linestyle='--')
+axs['sims'].axvline(xx[100],color='deeppink',linestyle='--')
+
+axs['sims'].set(title='Tumour',ylabel='Cells')
+axs['sims'].set_xticks(ticks=[xx[50],xx[75],xx[100]],labels=['Sample 1','Sample 2','Sample 3'])
+
+custom_lines=[Line2D([0],[0],color='green',label='Normoxic'),Line2D([0],[0],color='orange',label='Hypoxic'),Line2D([0],[0],color='red',label='Necrotic')]
+axs['sims'].legend(handles=custom_lines)
+
+axs['f'].plot(t_eval,p[50,:],color='purple')
+axs['f'].plot(t_eval,p[75,:],color='magenta')
+axs['f'].plot(t_eval,p[100,:],color='deeppink')
+
+axs['s'].set(ylim=(0,1))
+axs1=axs['s'].twinx()
+
+axs1.set_yticks(ticks=[0.95],labels=['Sample'])
+
+axs['s'].axhspan(0.9,1,0,1/3,color='purple')
+axs['s'].axhspan(0.9,1,1/3,2/3,color='magenta')
+axs['s'].axhspan(0.9,1,2/3,1,color='deeppink')
+
+axs['s'].axvline(1/3,color='k')
+axs['s'].axvline(2/3,color='k')
+axs['s'].axhline(0.9,color='k')
+
+axs['s'].axhspan(h[50]+n[50],h[50]+n[50]+c[50],0,1/3,color='green',alpha=0.5)
+axs['s'].axhspan(n[50],n[50]+h[50],0,1/3,color='orange',alpha=0.5)
+axs['s'].axhspan(0,n[50],0,1/3,color='red',alpha=0.5)
+
+axs['s'].axhspan(h[75]+n[75],h[75]+n[75]+c[75],1/3,2/3,color='green',alpha=0.5)
+axs['s'].axhspan(n[75],n[75]+h[75],1/3,2/3,color='orange',alpha=0.5)
+axs['s'].axhspan(0,n[75],1/3,2/3,color='red',alpha=0.5)
+
+axs['s'].axhspan(h[100]+n[100],h[100]+n[100]+c[100],2/3,1,color='green',alpha=0.5)
+axs['s'].axhspan(n[100],n[100]+h[100],2/3,1,color='orange',alpha=0.5)
+axs['s'].axhspan(0,n[100],2/3,1,color='red',alpha=0.5)
+
+axs['f'].set(title='Fluoresence',xlabel='t (Hours)',ylabel='Fluorescence')
+axs['s'].set(yticks=[],title='Cell Type Proportions',xlabel='Sample')
+axs['s'].set_xticks(ticks=[1/6,0.5,1-1/6],labels=['1','2','3'])
+
+plt.show()
+```
+
+```{python}
+plt.ylim(0,1)
+
+plt.axhspan(h[50]+n[50],h[50]+n[50]+c[50],0,1/3,color='green',alpha=0.5)
+plt.axhspan(n[50],n[50]+h[50],0,1/3,color='orange',alpha=0.5)
+plt.axhspan(0,n[50],0,1/3,color='red',alpha=0.5)
+
+plt.axhspan(h[75]+n[75],h[75]+n[75]+c[75],1/3,2/3,color='green',alpha=0.5)
+plt.axhspan(n[75],n[75]+h[75],1/3,2/3,color='orange',alpha=0.5)
+plt.axhspan(0,n[75],1/3,2/3,color='red',alpha=0.5)
+
+plt.axhspan(h[100]+n[100],h[100]+n[100]+c[100],2/3,1,color='green',alpha=0.5)
+plt.axhspan(n[100],n[100]+h[100],2/3,1,color='orange',alpha=0.5)
+plt.axhspan(0,n[100],2/3,1,color='red',alpha=0.5)
+
+plt.show()
+```
+
+#### PpIX Animation
+
+```{python}
+fig,ax=plt.subplots()
+ax1=plt.twinx()
+fluorescence_line=ax.plot(xx,p[:,0],color='blue')[0]
+ax.set(ylim=(0,1e-3))
+def update(frame):
+    fluorescence_data=p[:,frame]
+    fluorescence_line.set_ydata(fluorescence_data)
+    return (fluorescence_line)
+ax1.plot(xx,c,color='green',zorder=-10)
+ax1.plot(xx,h,color='orange',zorder=-10)
+ax1.plot(xx,n,color='red',zorder=-10)
+ax1.set(ylabel='Cells')
+ax.axhline(1e-5,color='pink',linestyle='--')
+ax.axhline(5e-5,color='mediumorchid',linestyle='--')
+ax.axhline(1e-4,color='fuchsia',linestyle='--')
+ax.axhline(5e-4,color='indigo',linestyle='--')
+ax.set(ylabel='Fluorescence')
+ani=animation.FuncAnimation(fig=fig,func=update,frames=nplots,interval=250)
+ani.save('fluoresce_plot.mp4')
+plt.show()
+```
+
+```{python}
+resect_1,resect_2,resect_3,resect_4=np.zeros(p.shape[1]),np.zeros(p.shape[1]),np.zeros(p.shape[1]),np.zeros(p.shape[1])
+for k in range(p.shape[1]):
+    for i in range(p.shape[0]):
+        if resect_1_ind[i,k]==1:
+            resect_1[k]+=c[i]+h[i]+n[i]
+        if resect_2_ind[i,k]==1:
+            resect_2[k]+=c[i]+h[i]+n[i]
+        if resect_3_ind[i,k]==1:
+            resect_3[k]+=c[i]+h[i]+n[i]
+        if resect_4_ind[i,k]==1:
+            resect_4[k]+=c[i]+h[i]+n[i]
+```
+
+```{python}
+plt.plot(t_eval,resect_1,color='pink')
+plt.plot(t_eval,resect_2,color='mediumorchid')
+plt.plot(t_eval,resect_3,color='fuchsia')
+plt.plot(t_eval,resect_4,color='indigo')
+custom_lines=[Line2D([0],[0],color='pink',label=r'$p\geq 1\times 10^{-5}$'),Line2D([0],[0],color='mediumorchid',label=r'$p\geq 5\times 10^{-5}$'),Line2D([0],[0],color='fuchsia',label=r'$p\geq 1\times 10^{-4}$'),Line2D([0],[0],color='indigo',label=r'$p\geq 5\times 10^{-4}$')]
+plt.legend(handles=custom_lines,title='Fluorescence\nThreshold')
+plt.axvline(3,color='red',linestyle='--')
+plt.axvline(8,color='red',linestyle='--')
+plt.xticks(ticks=[0,3,11/2,8,10,15,20,24],labels=[0,3,'Typical\nSurgical\nWindow',8,10,15,20,24])
+plt.xlabel('t (Hours)',fontsize=15)
+plt.ylabel('Cells removed in resection',fontsize=15)
+plt.show()
+```
+
+```{python}
+plt.plot(xx,c_resect_flair,color='green')
+plt.plot(xx,h_resect_flair,color='orange')
+plt.plot(xx,n_resect_flair,color='red')
+plt.plot(xx,c_resect_t1,color='green',linestyle='--')
+plt.plot(xx,h_resect_t1,color='orange',linestyle='--')
+plt.plot(xx,n_resect_t1,color='red',linestyle='--')
+custom_lines=[Line2D([0],[0],color='k',linestyle='--',label='T1Gd based resection'),Line2D([0],[0],color='k',label='FLAIR based resection')]
+plt.legend(handles=custom_lines,bbox_to_anchor=(1,1))
+plt.title('Imaging Based Resection')
+plt.show()
+```
+
+#### Resection Plot
+
+```{python}
+t1gd_resect=[]
+flair_resect=[]
+for k in range(c.size):
+    if c[k]+h[k]+n[k]>=0.8:
+        t1gd_resect.append(k)
+    if c[k]+h[k]+n[k]>=0.16:
+        flair_resect.append(k)
+```
+
+```{python}
+c_resect_t1,h_resect_t1,n_resect_t1=np.zeros_like(c),np.zeros_like(h),np.zeros_like(n)
+c_resect_flair,h_resect_flair,n_resect_flair=np.zeros_like(c),np.zeros_like(h),np.zeros_like(n)
+for k in range(c.size):
+    if k in t1gd_resect:
+        c_resect_t1[k]=0
+        h_resect_t1[k]=0
+        n_resect_t1[k]=0
+    else:
+        c_resect_t1[k]=c[k]
+        h_resect_t1[k]=h[k]
+        n_resect_t1[k]=n[k]
+    if k in flair_resect:
+        c_resect_flair[k]=0
+        h_resect_flair[k]=0
+        n_resect_flair[k]=0
+    else:
+        c_resect_flair[k]=c[k]
+        h_resect_flair[k]=h[k]
+        n_resect_flair[k]=n[k]
+```
+
+```{python}
+resect_1_ind,resect_2_ind,resect_3_ind,resect_4_ind=np.zeros((p.shape[0],p.shape[1])),np.zeros((p.shape[0],p.shape[1])),np.zeros((p.shape[0],p.shape[1])),np.zeros((p.shape[0],p.shape[1]))
+for i in range(p.shape[0]):
+    for j in range(p.shape[1]):
+        if p[i,j]>=1e-5:
+            resect_1_ind[i,j]=1
+        if p[i,j]>=5e-5:
+            resect_2_ind[i,j]=1
+        if p[i,j]>=1e-4:
+            resect_3_ind[i,j]=1
+        if p[i,j]>=5e-4:
+            resect_4_ind[i,j]=1
+```
+
+### Flourescence Animation
+
+```{python}
+full_resect_1,full_resect_2,full_resect_3,full_resect_4=np.zeros_like(p),np.zeros_like(p),np.zeros_like(p),np.zeros_like(p)
+for i in range(p.shape[0]):
+    for j in range(p.shape[1]):
+        if resect_1_ind[i,j]==1:
+            full_resect_1[i,j]=0
+        else:
+            full_resect_1[i,j]=c[i]+h[i]+n[i]
+        if resect_2_ind[i,j]==1:
+            full_resect_2[i,j]=0
+        else:
+            full_resect_2[i,j]=c[i]+h[i]+n[i]
+        if resect_3_ind[i,j]==1:
+            full_resect_3[i,j]=0
+        else:
+            full_resect_3[i,j]=c[i]+h[i]+n[i]
+        if resect_4_ind[i,j]==1:
+            full_resect_4[i,j]=0
+        else:
+            full_resect_4[i,j]=c[i]+h[i]+n[i]
+```
+
+```{python}
+fig,ax=plt.subplots()
+
+line1=ax.plot(xx,full_resect_1[:,0],color='pink')[0]
+line2=ax.plot(xx,full_resect_2[:,0],color='mediumorchid')[0]
+line3=ax.plot(xx,full_resect_3[:,0],color='fuchsia')[0]
+line4=ax.plot(xx,full_resect_4[:,0],color='indigo')[0]
+def update(frame):
+    line1_data=full_resect_1[:,frame]
+    line2_data=full_resect_2[:,frame]
+    line3_data=full_resect_3[:,frame]
+    line4_data=full_resect_4[:,frame]
+    line1.set_ydata(line1_data)
+    line2.set_ydata(line2_data)
+    line3.set_ydata(line3_data)
+    line4.set_ydata(line4_data)
+    return (line1,line2,line3,line4)
+custom_lines=[Line2D([0],[0],color='pink',label=r'$p\geq 1\times 10^{-5}$'),Line2D([0],[0],color='mediumorchid',label=r'$p\geq 5\times 10^{-5}$'),Line2D([0],[0],color='fuchsia',label=r'$p\geq 1\times 10^{-4}$'),Line2D([0],[0],color='indigo',label=r'$p\geq 5\times 10^{-4}$'),Line2D([0],[0],color='red',linestyle='--',label='T1Gd'),Line2D([0],[0],color='green',linestyle='--',label='FLAIR')]
+fig.legend(handles=custom_lines,bbox_to_anchor=(0.9,0.9))
+plt.plot(xx,c_resect_t1+h_resect_t1+n_resect_t1,color='red',linestyle='--')
+plt.plot(xx,c_resect_flair+h_resect_flair+n_resect_flair,color='green',linestyle='--')
+ax.set(ylabel='Cells Remaining After Resection')
+ani=animation.FuncAnimation(fig=fig,func=update,frames=nplots,interval=250)
+ani.save('resection.mp4')
+plt.show()
+```
+
+### Diffusion Figure
+
+```{python}
+fig,axs=plt.subplot_mosaic([['100','200']],layout='constrained',figsize=(8,3))
+for i in range(len(Dc_sols)):
+    axs['100'].plot(xx,Dc_sols[i].y[0:N,25],color=cmap(i/len(Dc_sols)))
+    axs['200'].plot(xx,Dc_sols[i].y[0:N,-1],color=cmap(i/len(Dc_sols)))
+axs['200'].set(yticks=[],title='Day 200')
+axs['100'].set(title='Day 100')
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['100','200']],layout='constrained',figsize=(8,3))
+for i in range(len(rho_sols)):
+    axs['100'].plot(xx,rho_sols[i].y[0:N,25],color=cmap(i/len(Dc_sols)))
+    axs['200'].plot(xx,rho_sols[i].y[0:N,-1],color=cmap(i/len(Dc_sols)))
+axs['200'].set(yticks=[],title='Day 200')
+axs['100'].set(title='Day 100')
+plt.show()
+```
