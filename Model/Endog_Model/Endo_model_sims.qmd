@@ -1,0 +1,980 @@
+---
+title: Endogenous Model
+format: 
+    html: 
+        toc: true
+        lightbox: true
+        number-sections: true
+        code-fold: true
+        code-tools: true
+        code-overflow: wrap
+---
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from tqdm import tqdm
+import scipy
+from sklearn.linear_model import LinearRegression
+```
+
+# Model Introduction
+
+5-ALA is synthesised endogenously in healthy cells in the body. We can include this in the 5-ala model by including a constant term, $r_0$, in the equation for $A_i$. 
+
+$$
+\begin{align}
+\frac{dA_i}{dt}&=\alpha_{A_i}A_o-\alpha_{A_e}A_i-r_1A_i+r_0,\\
+\frac{dP_o}{dt}&=\alpha_{P_e}P_i-\alpha_{P_i}P_o,\\
+\frac{dP_i}{dt}&=\alpha_{P_i}P_o-\alpha_{P_e}P_i+r_1A_i-r_2P_i,\\
+\frac{dH_i}{dt}&=r_2P_i-k_{-3}H_i
+\end{align}
+$$
+
+with initial conditions
+
+$$
+A_i(0)=\frac{r_0}{\alpha_{A_e}+r_1}, \; P_i(0)=\frac{r_1r_0}{r_2(\alpha_{A_e}+r_1)}, \; H_i(0)=\frac{\alpha_{P_e}r_1r_0}{\alpha_{P_i}k_{-3}(\alpha_{A_e}+r_1)}
+$$
+
+## Model Simulation
+
+We can write a function to simulate this model:
+
+```{python}
+def model_sim_end(end=24,ao=1,a_i=1,a_e=0.1,p_i=1,p_e=0.1,r1=1,r2=1,r0=0.03,km3=0.1,VW=1,VT=4e-3):
+    t=np.linspace(0,end,100*end)
+    dt=t[1]-t[0]
+
+    a0=r0/(a_e+r1)
+    p0=(r1*r0)/(r2*(a_e+r1))
+    h0=p_e*r1*r0/(p_i*km3*(a_e+r1))
+
+    ai,po,pi,hi=np.zeros(t.size),np.zeros(t.size),np.zeros(t.size),np.zeros(t.size)
+    ai[0],pi[0],hi[0]=a0,p0,h0
+    u=np.zeros((t.size,4))
+    u[0]=np.array([ai[0],po[0],pi[0],hi[0]])
+    V=VT/VW
+
+    A=np.array([[1+dt*(a_e+r1),0,0,0],[0,(1+dt*p_i*V),-dt*p_e*V,0],[-r1*dt,-dt*p_i,1+dt*p_e+dt*r2,0],[0,0,-dt*r2,1+dt*km3]])
+    for k in range(t.size-1):
+        u[k+1]=(np.linalg.inv(A)@(u[k].reshape(-1,1)+np.array([dt*a_i*ao+dt*r0,0,0,0]).reshape(-1,1))).reshape(1,4)
+    return t,u
+```
+
+```{python}
+def plotting(t,u):
+    fig,axs=plt.subplots(2,1,layout='constrained')
+    axs[0].plot(t,u[:,0],color='orange')
+    axs[1].plot(t,u[:,1],color='blue')
+    axs[0].plot(t,u[:,2],color='blue')
+    axs[0].plot(t,u[:,3],color='red')
+
+    axs[0].set_xticks([])
+    axs[1].set_xlabel('t (Hours)',fontsize=15)
+    axs[0].set_ylabel('Concentration',fontsize=15)
+    axs[1].set_ylabel('Concentration',fontsize=15)
+    axs[0].set_title('Inside Cell',fontsize=15)
+    axs[1].set_title('Outside Cell',fontsize=15)
+
+    custom_lines_in=[Line2D([0],[0],color='orange',label='5-ALA'),Line2D([0],[0],color='blue',label='PpIX'),Line2D([0],[0],color='red',label='Heme')]
+    custom_lines_out=[Line2D([0],[0],color='blue',label='PpIX')]
+    axs[0].legend(handles=custom_lines_in,fontsize=13)
+    axs[1].legend(handles=custom_lines_out,fontsize=13)
+    plt.show()
+```
+
+```{python}
+t,u=model_sim_end(end=24)
+```
+
+```{python}
+plotting(t,u)
+```
+
+## Steady states
+
+The steady state of the system is 
+
+$$
+\begin{align}
+A_i^*&=\frac{\alpha_{A_i}A_o+r_0}{\alpha_{A_e}+r_1},\\
+P_i^*&=\frac{r_1(\alpha_{A_i}A_o+r_0)}{r_2(\alpha_{A_e}+r_1)},\\
+P_o^*&=\frac{\alpha_{P_e}r_1(\alpha_{A_i}A_o+r_0)}{\alpha_{P_i}r_2(\alpha_{A_e}+r_1)},\\
+H_i^*&=\frac{\alpha_{P_e}r_1(\alpha_{A_i}A_o+r_0)}{\alpha_{P_i}k_{-3}(\alpha_{A_e}+r_1)}.
+\end{align}
+$$
+
+We can plot the effect of each parameter on the steady states.
+
+```{python}
+def steady_state(ao=1,a_i=1,a_e=0.1,p_i=1,p_e=0.1,r1=1,r2=1,r0=0.03,km3=0.1,VW=1,VT=4e-3):
+    ai=(a_i*ao+r0)/(a_e+r1)
+    pi=r1*ai/r2
+    po=p_e*pi/p_i
+    hi=r2*pi/km3
+    return ai,po,pi,hi
+```
+
+```{python}
+ai_ss,po_ss,pi_ss,hi_ss=steady_state()
+```
+
+```{python}
+def plotting_steady_state(t,u,ai_ss,po_ss,pi_ss,hi_ss):
+    fig,axs=plt.subplots(2,1,layout='constrained')
+    axs[0].plot(t,u[:,0],color='orange')
+    axs[1].plot(t,u[:,1],color='blue')
+    axs[0].plot(t,u[:,2],color='blue')
+    axs[0].plot(t,u[:,3],color='red')
+
+    axs[0].axhline(ai_ss,color='orange',linestyle='--')
+    axs[1].axhline(po_ss,color='blue',linestyle='--')
+    axs[0].axhline(pi_ss,color='blue',linestyle='--')
+    axs[0].axhline(hi_ss,color='red',linestyle='--')
+
+    axs[0].set_xticks([])
+    axs[1].set_xlabel('t (Hours)',fontsize=15)
+    axs[0].set_ylabel('Concentration',fontsize=15)
+    axs[1].set_ylabel('Concentration',fontsize=15)
+    axs[0].set_title('Inside Cell',fontsize=15)
+    axs[1].set_title('Outside Cell',fontsize=15)
+
+    custom_lines_in=[Line2D([0],[0],color='orange',label='5-ALA'),Line2D([0],[0],color='blue',label='PpIX'),Line2D([0],[0],color='red',label='Heme')]
+    custom_lines_out=[Line2D([0],[0],color='blue',label='PpIX')]
+    axs[0].legend(handles=custom_lines_in,fontsize=13)
+    axs[1].legend(handles=custom_lines_out,fontsize=13)
+    plt.show()
+```
+
+```{python}
+plotting_steady_state(t=t,u=u,ai_ss=ai_ss,po_ss=po_ss,pi_ss=pi_ss,hi_ss=hi_ss)
+```
+
+```{python}
+ais,aes,pis,pes,r0s,r1s,r2s,km3s=np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250)
+```
+
+```{python}
+ai_ai_ss=np.zeros_like(ais)
+ai_po_ss=np.zeros_like(ais)
+ai_pi_ss=np.zeros_like(ais)
+ai_hi_ss=np.zeros_like(ais)
+for i in tqdm(range(ais.size)):
+    ai_ss,po_ss,pi_ss,hi_ss=steady_state(a_i=ais[i])
+    ai_ai_ss[i]=ai_ss
+    ai_po_ss[i]=po_ss
+    ai_pi_ss[i]=pi_ss
+    ai_hi_ss[i]=hi_ss
+```
+
+```{python}
+ae_ai_ss=np.zeros_like(aes)
+ae_po_ss=np.zeros_like(aes)
+ae_pi_ss=np.zeros_like(aes)
+ae_hi_ss=np.zeros_like(aes)
+for i in tqdm(range(aes.size)):
+    ai_ss,po_ss,pi_ss,hi_ss=steady_state(a_e=aes[i])
+    ae_ai_ss[i]=ai_ss
+    ae_po_ss[i]=po_ss
+    ae_pi_ss[i]=pi_ss
+    ae_hi_ss[i]=hi_ss
+```
+
+```{python}
+pi_ai_ss=np.zeros_like(pis)
+pi_po_ss=np.zeros_like(pis)
+pi_pi_ss=np.zeros_like(pis)
+pi_hi_ss=np.zeros_like(pis)
+for i in tqdm(range(pis.size)):
+    ai_ss,po_ss,pi_ss,hi_ss=steady_state(p_i=pis[i])
+    pi_ai_ss[i]=ai_ss
+    pi_po_ss[i]=po_ss
+    pi_pi_ss[i]=pi_ss
+    pi_hi_ss[i]=hi_ss
+```
+
+```{python}
+pe_ai_ss=np.zeros_like(pes)
+pe_po_ss=np.zeros_like(pes)
+pe_pi_ss=np.zeros_like(pes)
+pe_hi_ss=np.zeros_like(pes)
+for i in tqdm(range(pes.size)):
+    ai_ss,po_ss,pi_ss,hi_ss=steady_state(p_e=pes[i])
+    pe_ai_ss[i]=ai_ss
+    pe_po_ss[i]=po_ss
+    pe_pi_ss[i]=pi_ss
+    pe_hi_ss[i]=hi_ss
+```
+
+```{python}
+r1_ai_ss=np.zeros_like(r1s)
+r1_po_ss=np.zeros_like(r1s)
+r1_pi_ss=np.zeros_like(r1s)
+r1_hi_ss=np.zeros_like(r1s)
+for i in tqdm(range(r1s.size)):
+    ai_ss,po_ss,pi_ss,hi_ss=steady_state(r1=r1s[i])
+    r1_ai_ss[i]=ai_ss
+    r1_po_ss[i]=po_ss
+    r1_pi_ss[i]=pi_ss
+    r1_hi_ss[i]=hi_ss
+```
+
+```{python}
+r2_ai_ss=np.zeros_like(r2s)
+r2_po_ss=np.zeros_like(r2s)
+r2_pi_ss=np.zeros_like(r2s)
+r2_hi_ss=np.zeros_like(r2s)
+for i in tqdm(range(r2s.size)):
+    ai_ss,po_ss,pi_ss,hi_ss=steady_state(r2=r2s[i])
+    r2_ai_ss[i]=ai_ss
+    r2_po_ss[i]=po_ss
+    r2_pi_ss[i]=pi_ss
+    r2_hi_ss[i]=hi_ss
+```
+
+```{python}
+km3_ai_ss=np.zeros_like(km3s)
+km3_po_ss=np.zeros_like(km3s)
+km3_pi_ss=np.zeros_like(km3s)
+km3_hi_ss=np.zeros_like(km3s)
+for i in tqdm(range(km3s.size)):
+    ai_ss,po_ss,pi_ss,hi_ss=steady_state(km3=km3s[i])
+    km3_ai_ss[i]=ai_ss
+    km3_po_ss[i]=po_ss
+    km3_pi_ss[i]=pi_ss
+    km3_hi_ss[i]=hi_ss
+```
+
+```{python}
+r0_ai_ss=np.zeros_like(r0s)
+r0_po_ss=np.zeros_like(r0s)
+r0_pi_ss=np.zeros_like(r0s)
+r0_hi_ss=np.zeros_like(r0s)
+for i in tqdm(range(r0s.size)):
+    ai_ss,po_ss,pi_ss,hi_ss=steady_state(r0=r0s[i])
+    r0_ai_ss[i]=ai_ss
+    r0_po_ss[i]=po_ss
+    r0_pi_ss[i]=pi_ss
+    r0_hi_ss[i]=hi_ss
+```
+
+```{python}
+fig,axs=plt.subplots()
+axs.semilogx(ais,ai_pi_ss,color='red')
+#axs_pi.plot(ais,ai_pi_tts,linestyle='--',color='b')
+axs.set_xlabel(r'$\alpha_{A_i}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(aes,ae_pi_ss,color='orange')
+axs.set_xlabel(r'$\alpha_{A_e}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(pis,pi_pi_ss,color='gold')
+axs.set_xlabel(r'$\alpha_{P_i}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(pes,pe_pi_ss,color='green')
+axs.set_xlabel(r'$\alpha_{P_e}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(r0s,r0_pi_ss,color='dodgerblue')
+axs.set_xlabel(r'$r_0$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(r1s,r1_pi_ss,color='dodgerblue')
+axs.set_xlabel(r'$r_1$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(r2s,r2_pi_ss,color='blue')
+axs.set_xlabel(r'$r_2$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(km3s,km3_pi_ss,color='purple')
+axs.set_xlabel(r'$k_{-3}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['ai','ae'],['pi','pe'],['r0','r1'],['r2','km3']],layout='constrained',figsize=(8,10))
+
+axs['ai'].semilogx(ais,ai_pi_ss,color='red')
+axs['ae'].semilogx(aes,ae_pi_ss,color='orange')
+axs['pi'].semilogx(pis,pi_pi_ss,color='gold')
+axs['pe'].semilogx(pes,pe_pi_ss,color='lawngreen')
+axs['r0'].semilogx(r0s,r0_pi_ss,color='green')
+axs['r1'].semilogx(r1s,r1_pi_ss,color='dodgerblue')
+axs['r2'].semilogx(r2s,r2_pi_ss,color='blue')
+axs['km3'].semilogx(km3s,km3_pi_ss,color='purple')
+
+axs['ai'].set(xticks=[])
+axs['ae'].set(xticks=[])
+axs['pi'].set(xticks=[])
+axs['pe'].set(xticks=[])
+axs['r0'].set(xticks=[])
+axs['r1'].set(xticks=[])
+
+axs['ai'].set_xlabel(r'$\alpha_{A_i}$',fontsize=15)
+axs['ae'].set_xlabel(r'$\alpha_{A_e}$',fontsize=15)
+axs['pi'].set_xlabel(r'$\alpha_{P_i}$',fontsize=15)
+axs['pe'].set_xlabel(r'$\alpha_{P_e}$',fontsize=15)
+axs['r0'].set_xlabel(r'$r_0$',fontsize=15)
+axs['r1'].set_xlabel(r'$r_1$',fontsize=15)
+axs['r2'].set_xlabel(r'$r_2$',fontsize=15)
+axs['km3'].set_xlabel(r'$k_{-3}$',fontsize=15)
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(4,2,layout='constrained',figsize=(6,8),sharey='row',sharex='col')
+
+axs[0,0].semilogx(ais,ai_pi_ss,color='red')
+axs[0,1].semilogx(aes,ae_pi_ss,color='orange')
+axs[1,0].semilogx(pis,pi_pi_ss,color='gold')
+axs[1,1].semilogx(pes,pe_pi_ss,color='lawngreen')
+axs[2,0].semilogx(r0s,r0_pi_ss,color='green')
+axs[2,1].semilogx(r1s,r1_pi_ss,color='dodgerblue')
+axs[3,0].semilogx(r2s,r2_pi_ss,color='blue')
+axs[3,1].semilogx(km3s,km3_pi_ss,color='purple')
+
+#axs[0,0].set(xticks=[])
+#axs[0,1].set(xticks=[])
+#axs[1,0].set(xticks=[])
+#axs[1,1].set(xticks=[])
+#axs[2,0].set(xticks=[])
+#axs[2,1].set(xticks=[])
+
+axs[0,0].set_xlabel(r'$\alpha_{A_i}$',fontsize=12)
+axs[0,1].set_xlabel(r'$\alpha_{A_e}$',fontsize=12)
+axs[1,0].set_xlabel(r'$\alpha_{P_i}$',fontsize=12)
+axs[1,1].set_xlabel(r'$\alpha_{P_e}$',fontsize=12)
+axs[2,0].set_xlabel(r'$r_0$',fontsize=12)
+axs[2,1].set_xlabel(r'$r_1$',fontsize=12)
+axs[3,0].set_xlabel(r'$r_2$',fontsize=12)
+axs[3,1].set_xlabel(r'$k_{-3}$',fontsize=12)
+
+axs[0,0].set_ylabel('Fluorescence\nSteady State',fontsize=12)
+axs[1,0].set_ylabel('Fluorescence\nSteady State',fontsize=12)
+axs[2,0].set_ylabel('Fluorescence\nSteady State',fontsize=12)
+axs[3,0].set_ylabel('Fluorescence\nSteady State',fontsize=12)
+
+fig.suptitle('Fluorescence Steady State',fontsize=17)
+
+plt.show()
+```
+
+## Time to a fluorescence threshold
+
+```{python}
+def time_to_fluoresce(thresh,ao=1,a_i=1,a_e=0.1,p_i=1,p_e=0.1,r1=1,r2=1,r0=0.03,km3=0.1,VW=1,VT=4e-3):
+    t,u=model_sim_end(ao=1,a_i=a_i,a_e=a_e,p_i=p_i,p_e=p_e,r1=r1,r2=r2,r0=r0,km3=km3,VW=1,VT=4e-3)
+    ttf=-1
+    for k in range(t.size):
+        if u[k,2]>=thresh:
+            ttf=t[k]
+            break
+    return ttf
+```
+
+```{python}
+ttf=time_to_fluoresce(thresh=0.7)
+```
+
+```{python}
+def plotting_thresh(t,u,thresh,ttf,lim0=0,lim1=1):
+    plt.axvline(ttf,0,0.7,color='green',linestyle='--')
+    plt.axhspan(0.7,1,color='magenta',alpha=0.5)
+    plt.axhline(0.7,color='magenta')
+    plt.plot(t,u[:,2],color='blue')
+    plt.xlim(0,24)
+    plt.xlabel('t (Hours)',fontsize=15)
+    plt.ylabel('Fluorescence',fontsize=15)
+    plt.ylim(lim0,lim1)
+    plt.yticks([0.95],labels=['Visible\nFluorescence'],rotation=90)
+    plt.xticks([0,ttf,5,10,15,20,24],labels=[0,'TTF',5,10,15,20,24])
+    custom_lines=[Line2D([0],[0],color='b',label='PpIX'),Line2D([0],[0],color='green',linestyle='--',label='Time to Visible\nFluorescence'),Patch(color='magenta',alpha=0.5,label='Visible\nFluorescence')]
+    plt.legend(handles=custom_lines)
+    plt.show()
+```
+
+```{python}
+plotting_thresh(t,u,1,ttf)
+```
+
+```{python}
+threshold=0.5
+ai_ttf=np.zeros_like(ais)
+ae_ttf=np.zeros_like(aes)
+pi_ttf=np.zeros_like(pis)
+pe_ttf=np.zeros_like(pes)
+r0_ttf=np.zeros_like(r0s)
+r1_ttf=np.zeros_like(r1s)
+r2_ttf=np.zeros_like(r2s)
+km3_ttf=np.zeros_like(km3s)
+for i in tqdm(range(ais.size)):
+    ttf_ai=time_to_fluoresce(thresh=threshold,a_i=ais[i])
+    ai_ttf[i]=ttf_ai
+    ttf_ae=time_to_fluoresce(thresh=threshold,a_e=aes[i])
+    ae_ttf[i]=ttf_ae
+    ttf_pi=time_to_fluoresce(thresh=threshold,p_i=pis[i])
+    pi_ttf[i]=ttf_pi
+    ttf_pe=time_to_fluoresce(thresh=threshold,p_e=pes[i])
+    pe_ttf[i]=ttf_pe
+    ttf_r0=time_to_fluoresce(thresh=threshold,r0=r0s[i])
+    r0_ttf[i]=ttf_r0
+    ttf_r1=time_to_fluoresce(thresh=threshold,r1=r1s[i])
+    r1_ttf[i]=ttf_r1
+    ttf_r2=time_to_fluoresce(thresh=threshold,r2=r2s[i])
+    r2_ttf[i]=ttf_r2
+    ttf_km3=time_to_fluoresce(thresh=threshold,km3=km3s[i])
+    km3_ttf[i]=ttf_km3
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['ai','ae'],['pi','pe'],['r0','r1'],['r2','km3']],layout='constrained',figsize=(9,10))
+
+axs_ai=axs['ai'].twinx()
+axs_ae=axs['ae'].twinx()
+axs_pi=axs['pi'].twinx()
+axs_pe=axs['pe'].twinx()
+axs_r0=axs['r0'].twinx()
+axs_r1=axs['r1'].twinx()
+axs_r2=axs['r2'].twinx()
+axs_km3=axs['km3'].twinx()
+
+axs['ai'].semilogx(ais,ai_pi_ss,color='red')
+axs['ae'].semilogx(aes,ae_pi_ss,color='orange')
+axs['pi'].semilogx(pis,pi_pi_ss,color='gold')
+axs['pe'].semilogx(pes,pe_pi_ss,color='lawngreen')
+axs['r0'].semilogx(r0s,r0_pi_ss,color='green')
+axs['r1'].semilogx(r1s,r1_pi_ss,color='dodgerblue')
+axs['r2'].semilogx(r2s,r2_pi_ss,color='blue')
+axs['km3'].semilogx(km3s,km3_pi_ss,color='purple')
+
+axs_ai.plot(ais[np.argwhere(ai_ttf==-1)[-1].item()+1:],ai_ttf[np.argwhere(ai_ttf==-1)[-1].item()+1:],color='red',linestyle='--')
+axs_ae.plot(aes[:np.argwhere(ae_ttf==-1)[0].item()],ae_ttf[:np.argwhere(ae_ttf==-1)[0].item()],color='orange',linestyle='--')
+axs_pi.plot(pis,pi_ttf,color='gold',linestyle='--')
+axs_pe.plot(pes[:np.argwhere(pe_ttf==-1)[0].item()],pe_ttf[:np.argwhere(pe_ttf==-1)[0].item()],color='lawngreen',linestyle='--')
+axs_r0.plot(r0s,r0_ttf,color='green',linestyle='--')
+axs_r1.plot(r1s[np.argwhere(r1_ttf==-1)[-1].item()+1:],r1_ttf[np.argwhere(r1_ttf==-1)[-1].item()+1:],color='dodgerblue',linestyle='--')
+axs_r2.plot(r2s[:np.argwhere(r2_ttf==-1)[0].item()],r2_ttf[:np.argwhere(r2_ttf==-1)[0].item()],color='blue',linestyle='--')
+axs_km3.plot(km3s,km3_ttf,color='purple',linestyle='--')
+
+axs['ai'].axvspan(ais[np.argwhere(ai_ttf==-1)[0].item()],ais[np.argwhere(ai_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs['ae'].axvspan(aes[np.argwhere(ae_ttf==-1)[0].item()],aes[np.argwhere(ae_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs['pe'].axvspan(pes[np.argwhere(pe_ttf==-1)[0].item()],pes[np.argwhere(pe_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs['r1'].axvspan(r1s[np.argwhere(r1_ttf==-1)[0].item()],r1s[np.argwhere(r1_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs['r2'].axvspan(r2s[np.argwhere(r2_ttf==-1)[0].item()],r2s[np.argwhere(r2_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+
+axs['ai'].set(xticks=[])
+axs['ae'].set(xticks=[])
+axs['pi'].set(xticks=[])
+axs['pe'].set(xticks=[])
+axs['r0'].set(xticks=[])
+axs['r1'].set(xticks=[])
+
+axs['ai'].set_xlabel(r'$\alpha_{A_i}$',fontsize=15)
+axs['ae'].set_xlabel(r'$\alpha_{A_e}$',fontsize=15)
+axs['pi'].set_xlabel(r'$\alpha_{P_i}$',fontsize=15)
+axs['pe'].set_xlabel(r'$\alpha_{P_e}$',fontsize=15)
+axs['r0'].set_xlabel(r'$r_0$',fontsize=15)
+axs['r1'].set_xlabel(r'$r_1$',fontsize=15)
+axs['r2'].set_xlabel(r'$r_2$',fontsize=15)
+axs['km3'].set_xlabel(r'$k_{-3}$',fontsize=15)
+
+axs['ai'].set_ylabel('Fluorescence\nSteady State',fontsize=15)
+axs_ae.set_ylabel('Time to Visible\nFluorescence',fontsize=15)
+axs['pi'].set_ylabel('Fluorescence\nSteady State',fontsize=15)
+axs_pe.set_ylabel('Time to Visible\nFluorescence',fontsize=15)
+axs['r0'].set_ylabel('Fluorescence\nSteady State',fontsize=15)
+axs_r1.set_ylabel('Time to Visible\nFluorescence',fontsize=15)
+axs['r2'].set_ylabel('Fluorescence\nSteady State',fontsize=15)
+axs_km3.set_ylabel('Time to Visible\nFluorescence',fontsize=15)
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(4,2,layout='constrained',figsize=(6,8),sharey='row',sharex='col')
+
+axs[0,0].semilogx(ais[np.argwhere(ai_ttf==-1)[-1].item()+1:],ai_ttf[np.argwhere(ai_ttf==-1)[-1].item()+1:],color='red')
+axs[0,1].semilogx(aes[:np.argwhere(ae_ttf==-1)[0].item()],ae_ttf[:np.argwhere(ae_ttf==-1)[0].item()],color='orange')
+axs[1,0].semilogx(pis,pi_ttf,color='gold')
+axs[1,1].semilogx(pes[:np.argwhere(pe_ttf==-1)[0].item()],pe_ttf[:np.argwhere(pe_ttf==-1)[0].item()],color='lawngreen')
+axs[2,0].semilogx(r0s,r0_ttf,color='green')
+axs[2,1].semilogx(r1s[np.argwhere(r1_ttf==-1)[-1].item()+1:],r1_ttf[np.argwhere(r1_ttf==-1)[-1].item()+1:],color='dodgerblue')
+axs[3,0].semilogx(r2s[:np.argwhere(r2_ttf==-1)[0].item()],r2_ttf[:np.argwhere(r2_ttf==-1)[0].item()],color='blue')
+axs[3,1].semilogx(km3s,km3_ttf,color='purple')
+
+axs[0,0].axvspan(ais[np.argwhere(ai_ttf==-1)[0].item()],ais[np.argwhere(ai_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs[0,1].axvspan(aes[np.argwhere(ae_ttf==-1)[0].item()],aes[np.argwhere(ae_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs[1,1].axvspan(pes[np.argwhere(pe_ttf==-1)[0].item()],pes[np.argwhere(pe_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs[2,1].axvspan(r1s[np.argwhere(r1_ttf==-1)[0].item()],r1s[np.argwhere(r1_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs[3,0].axvspan(r2s[np.argwhere(r2_ttf==-1)[0].item()],r2s[np.argwhere(r2_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+
+#axs[0,0].set(xticks=[])
+#axs[0,1].set(xticks=[])
+#axs[1,0].set(xticks=[])
+#axs[1,1].set(xticks=[])
+#axs[2,0].set(xticks=[])
+#axs[2,1].set(xticks=[])
+
+axs[0,0].set_xlabel(r'$\alpha_{A_i}$',fontsize=12)
+axs[0,1].set_xlabel(r'$\alpha_{A_e}$',fontsize=12)
+axs[1,0].set_xlabel(r'$\alpha_{P_i}$',fontsize=12)
+axs[1,1].set_xlabel(r'$\alpha_{P_e}$',fontsize=12)
+axs[2,0].set_xlabel(r'$r_0$',fontsize=12)
+axs[2,1].set_xlabel(r'$r_1$',fontsize=12)
+axs[3,0].set_xlabel(r'$r_2$',fontsize=12)
+axs[3,1].set_xlabel(r'$k_{-3}$',fontsize=12)
+
+axs[0,0].set_ylabel('Time to Visible\nFluorescence',fontsize=12)
+axs[1,0].set_ylabel('Time to Visible\nFluorescence',fontsize=12)
+axs[2,0].set_ylabel('Time to Visible\nFluorescence',fontsize=12)
+axs[3,0].set_ylabel('Time to Visible\nFluorescence',fontsize=12)
+
+fig.suptitle('Time to Visible Fluorescence',fontsize=17)
+
+plt.show()
+```
+
+## Parameter Sensitivity
+
+### Fluorescence Level
+
+```{python}
+l_bounds=[0.01 for i in range(8)]
+u_bounds=[3 for i in range(8)]
+sampler=scipy.stats.qmc.LatinHypercube(d=8)
+sample=sampler.random(n=500)
+params=scipy.stats.qmc.scale(sample,l_bounds,u_bounds)
+```
+
+```{python}
+pi_samp=[]
+for i in tqdm(range(500)):
+    p=params[i]
+    t,u=model_sim_end(a_i=p[0],a_e=p[1],p_i=p[2],p_e=p[3],r0=p[4],r1=p[5],r2=p[6],km3=p[7])
+    pi_samp.append(u[:,2])
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['ai','ae'],['pi','pe'],['r0','r1'],['r2','km3']],layout='constrained',figsize=(8,10))
+for i in tqdm(range(500)):
+    axs['ai'].scatter(params[i,0],pi_samp[i][-1],color='red')
+    axs['ae'].scatter(params[i,1],pi_samp[i][-1],color='orange')
+    axs['pi'].scatter(params[i,2],pi_samp[i][-1],color='gold')
+    axs['pe'].scatter(params[i,3],pi_samp[i][-1],color='lawngreen')
+    axs['r0'].scatter(params[i,4],pi_samp[i][-1],color='green')
+    axs['r1'].scatter(params[i,5],pi_samp[i][-1],color='dodgerblue')
+    axs['r2'].scatter(params[i,6],pi_samp[i][-1],color='blue')
+    axs['km3'].scatter(params[i,7],pi_samp[i][-1],color='purple')
+axs['ai'].set(xticks=[])
+axs['ai'].set_ylabel('Fluorescence\nat 24 Hours',fontsize=15)
+axs['ai'].set_xlabel(r'$\alpha_{A_i}$',fontsize=15)
+axs['ae'].set(xticks=[],yticks=[])
+axs['ae'].set_xlabel(r'$\alpha_{A_e}$',fontsize=15)
+axs['pi'].set(xticks=[])
+axs['pi'].set_ylabel('Fluorescence\nat 24 Hours',fontsize=15)
+axs['pi'].set_xlabel(r'$\alpha_{P_i}$',fontsize=15)
+axs['pe'].set(xticks=[],yticks=[])
+axs['pe'].set_xlabel(r'$\alpha_{P_e}$',fontsize=15)
+axs['r0'].set(xticks=[])
+axs['r0'].set_ylabel('Fluorescence\nat 24 Hours',fontsize=15)
+axs['r0'].set_xlabel(r'$r_0$',fontsize=15)
+axs['r1'].set(xticks=[],yticks=[])
+axs['r1'].set_xlabel('$r_1$',fontsize=15)
+axs['r2'].set_ylabel('Fluorescence\nat 24 Hours',fontsize=15)
+axs['r2'].set_xlabel('$r_2$',fontsize=15)
+axs['km3'].set(yticks=[])
+axs['km3'].set_xlabel('$k_{-3}$',fontsize=15)
+plt.show()
+```
+
+```{python}
+pi_1,pi_12,pi_24=[],[],[]
+for i in tqdm(range(len(pi_samp))):
+    pi_1.append(pi_samp[i][100])
+    pi_12.append(pi_samp[i][1200])
+    pi_24.append(pi_samp[i][-1])
+```
+
+```{python}
+reg_1=LinearRegression().fit(params,pi_1)
+reg_12=LinearRegression().fit(params,pi_12)
+reg_24=LinearRegression().fit(params,pi_24)
+```
+
+```{python}
+plt.axhline(0,color='k')
+plt.scatter(0.1,reg_1.coef_[6],color='blue')#r2
+plt.scatter(0.2,reg_1.coef_[3],color='lawngreen')#pe
+plt.scatter(0.3,reg_1.coef_[5],color='dodgerblue')#r1
+plt.scatter(0.4,reg_1.coef_[1],color='orange')#ae
+plt.scatter(0.5,reg_1.coef_[4],color='green')#r0
+plt.scatter(0.6,reg_1.coef_[0],color='red')#ai
+plt.scatter(0.7,reg_1.coef_[7],color='purple')#km3
+plt.scatter(0.8,reg_1.coef_[2],color='gold')#pi
+
+plt.xticks([0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8],labels=['$r_2$',r'$\alpha_{P_e}$','$r_1$',r'$\alpha_{A_e}$','$r_0$',r'$\alpha_{A_i}$','$k_{-3}$',r'$\alpha_{P_i}$'],fontsize=13)
+plt.xlabel('Parameter',fontsize=15)
+plt.ylabel(r'Regression Coefficient ($\beta_i$)',fontsize=15)
+plt.title('1 Hour',fontsize=17)
+
+plt.show()
+```
+
+```{python}
+plt.axhline(0,color='k')
+plt.scatter(0.1,reg_12.coef_[6],color='blue')#r2
+plt.scatter(0.2,reg_12.coef_[3],color='lawngreen')#pe
+plt.scatter(0.3,reg_12.coef_[5],color='dodgerblue')#r1
+plt.scatter(0.4,reg_12.coef_[1],color='orange')#ae
+plt.scatter(0.5,reg_12.coef_[0],color='red')#ai
+plt.scatter(0.6,reg_12.coef_[4],color='green')#r0
+plt.scatter(0.7,reg_12.coef_[7],color='purple')#km3
+plt.scatter(0.8,reg_12.coef_[2],color='gold')#pi
+
+plt.xticks([0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8],labels=['$r_2$',r'$\alpha_{P_e}$','$r_1$',r'$\alpha_{A_e}$',r'$\alpha_{A_i}$','$r_0$','$k_{-3}$',r'$\alpha_{P_i}$'],fontsize=13)
+plt.xlabel('Parameter',fontsize=15)
+plt.ylabel(r'Regression Coefficient ($\beta_i$)',fontsize=15)
+plt.title('12 Hours',fontsize=17)
+
+plt.show()
+```
+
+```{python}
+plt.axhline(0,color='k')
+plt.scatter(0.1,reg_24.coef_[6],color='blue')#r2
+plt.scatter(0.2,reg_24.coef_[3],color='lawngreen')#pe
+plt.scatter(0.3,reg_24.coef_[5],color='dodgerblue')#r1
+plt.scatter(0.4,reg_24.coef_[1],color='orange')#ae
+plt.scatter(0.5,reg_24.coef_[0],color='red')#ai
+plt.scatter(0.6,reg_24.coef_[4],color='green')#r0
+plt.scatter(0.7,reg_24.coef_[7],color='purple')#km3
+plt.scatter(0.8,reg_24.coef_[2],color='gold')#pi
+
+plt.xticks([0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8],labels=['$r_2$',r'$\alpha_{P_e}$','$r_1$',r'$\alpha_{A_e}$',r'$\alpha_{A_i}$','$r_0$','$k_{-3}$',r'$\alpha_{P_i}$'],fontsize=13)
+plt.xlabel('Parameter',fontsize=15)
+plt.ylabel(r'Regression Coefficient ($\beta_i$)',fontsize=15)
+plt.title('24 Hours',fontsize=17)
+
+plt.show()
+```
+
+### TTF
+
+```{python}
+ttf_sens=np.zeros(len(pi_samp))
+for i in range(500):
+    p=pi_samp[i]
+    for k in range(p.size):
+        if p[k]>=0.5:
+            ttf_sens[i]=t[k]
+            break
+        if t[k]==t[-1]:
+            ttf_sens[i]=30
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['ai','ae'],['pi','pe'],['r0','r1'],['r2','km3']],layout='constrained',figsize=(8,10))
+axs['ai'].scatter(params[:,0],ttf_sens,color='red')
+axs['ae'].scatter(params[:,1],ttf_sens,color='orange')
+axs['pi'].scatter(params[:,2],ttf_sens,color='gold')
+axs['pe'].scatter(params[:,3],ttf_sens,color='lawngreen')
+axs['r0'].scatter(params[:,4],ttf_sens,color='green')
+axs['r1'].scatter(params[:,5],ttf_sens,color='dodgerblue')
+axs['r2'].scatter(params[:,6],ttf_sens,color='blue')
+axs['km3'].scatter(params[:,7],ttf_sens,color='purple')
+
+axs['ai'].set(xticks=[])
+axs['ai'].set_yticks([0,5,10,15,20,24,30],labels=[0,5,10,15,20,24,'NVF'])
+axs['ai'].set_ylabel('Time to Visible\nFluorescence',fontsize=15)
+axs['ai'].set_xlabel(r'$\alpha_{A_i}$',fontsize=15)
+
+axs['ae'].set(xticks=[],yticks=[])
+axs['ae'].set_xlabel(r'$\alpha_{A_e}$',fontsize=15)
+
+axs['pi'].set(xticks=[])
+axs['pi'].set_yticks([0,5,10,15,20,24,30],labels=[0,5,10,15,20,24,'NVF'])
+axs['pi'].set_ylabel('Time to Visible\nFluorescence',fontsize=15)
+axs['pi'].set_xlabel(r'$\alpha_{P_i}$',fontsize=15)
+
+axs['pe'].set(xticks=[],yticks=[])
+axs['pe'].set_xlabel(r'$\alpha_{P_e}$',fontsize=15)
+
+axs['r0'].set(xticks=[])
+axs['r0'].set_yticks([0,5,10,15,20,24,30],labels=[0,5,10,15,20,24,'NVF'])
+axs['r0'].set_ylabel('Time to Visible\nFluorescence',fontsize=15)
+axs['r0'].set_xlabel(r'$r_0$',fontsize=15)
+
+axs['r1'].set(xticks=[],yticks=[])
+axs['r1'].set_xlabel('$r_1$',fontsize=15)
+
+axs['r2'].set_ylabel('Time to Visible\nFluorescence',fontsize=15)
+axs['r2'].set_yticks([0,5,10,15,20,24,30],labels=[0,5,10,15,20,24,'NVF'])
+axs['r2'].set_xlabel('$r_2$',fontsize=15)
+
+axs['km3'].set(yticks=[])
+axs['km3'].set_xlabel('$k_{-3}$',fontsize=15)
+
+plt.show()
+```
+
+```{python}
+ttf_reg=LinearRegression().fit(params,ttf_sens)
+```
+
+```{python}
+plt.axhline(0,color='k')
+
+plt.scatter(0.1,ttf_reg.coef_[6],color='blue')#r2
+plt.scatter(0.2,ttf_reg.coef_[4],color='green')#r0
+plt.scatter(0.3,ttf_reg.coef_[5],color='dodgerblue')#r1
+plt.scatter(0.4,ttf_reg.coef_[1],color='orange')#ae
+plt.scatter(0.5,ttf_reg.coef_[0],color='red')#ai
+plt.scatter(0.6,ttf_reg.coef_[3],color='lawngreen')#pe
+plt.scatter(0.7,ttf_reg.coef_[2],color='gold')#pi
+plt.scatter(0.8,ttf_reg.coef_[7],color='purple')#km3
+
+plt.ylabel(r'Regression Coefficient ($\beta_{i}$)',fontsize=15)
+plt.xlabel('Parameter',fontsize=15)
+plt.xticks([0.1*i for i in range(1,9)],labels=[r'$r_2$',r'$r_0$',r'$r_1$',r'$\alpha_{A_e}$',r'$\alpha_{A_i}$',r'$\alpha_{P_e}$',r'$\alpha_{P_i}$',r'$k_{-3}$'],fontsize=13)
+plt.show()
+```
+
+## Likelihood
+
+```{python}
+ai_params,ae_params,pi_params,pe_params,r0_params,r1_params,r2_params,km3_params=np.arange(0.01,2,0.01),np.arange(0.01,2,0.01),np.arange(0.01,2,0.01),np.arange(0.01,2,0.01),np.arange(0.01,2,0.01),np.arange(0.01,2,0.01),np.arange(0.01,2,0.01),np.arange(0.01,2,0.01)
+```
+
+```{python}
+n=100
+sig_ai=0.1
+sig_po=0.001
+sig_pi=0.1
+sig_hi=0.1
+t,u=model_sim_end()
+n_obs=[0,n*3,n*6,n*9,n*12,n*15,n*18,n*21,-1]
+t_obs=t[n_obs]
+ai_obs,po_obs,pi_obs,hi_obs=np.zeros(len(n_obs)),np.zeros(len(n_obs)),np.zeros(len(n_obs)),np.zeros(len(n_obs))
+for i in range(len(n_obs)):
+    ai_obs[i]=max(np.random.normal(u[n_obs[i],0],scale=sig_ai),0)
+    po_obs[i]=max(np.random.normal(u[n_obs[i],1],scale=sig_po),0)
+    pi_obs[i]=max(np.random.normal(u[n_obs[i],2],scale=sig_pi),0)
+    hi_obs[i]=max(np.random.normal(u[n_obs[i],3],scale=sig_hi),0)
+```
+
+```{python}
+fig,axs=plt.subplots(2,1,layout='constrained')
+axs[0].plot(t,u[:,0],color='orange')
+axs[0].scatter(t_obs,ai_obs,color='orange',marker='x')
+axs[1].plot(t,u[:,1],color='blue')
+axs[1].scatter(t_obs,po_obs,color='blue',marker='x')
+axs[0].plot(t,u[:,2],color='blue')
+axs[0].scatter(t_obs,pi_obs,color='blue',marker='x')
+axs[0].plot(t,u[:,3],color='red')
+axs[0].scatter(t_obs,hi_obs,color='red',marker='x')
+
+axs[0].set(xticks=[])
+axs[1].set_xlabel('t (Hours)',fontsize=12)
+axs[0].set_ylabel('Concentration',fontsize=12)
+axs[1].set_ylabel('Concentration',fontsize=12)
+axs[0].set_title('Inside Cell',fontsize=14)
+axs[1].set_title('Outside Cell',fontsize=14)
+
+custom_lines=[Line2D([0],[0],color='orange',label='5-ALA'),Line2D([0],[0],color='blue',label='PpIX'),Line2D([0],[0],color='red',label='Heme')]
+custom_lines2=[Line2D([0],[0],color='k',label='Simulation'),Line2D([0],[0],marker='x',color='w',markeredgecolor='k',label='Observation')]
+axs[0].legend(handles=custom_lines)
+axs[1].legend(handles=custom_lines2)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots(2,1,layout='constrained')
+axs[0].plot(t,u[:,0],color='orange')
+axs[1].plot(t,u[:,1],color='blue')
+axs[0].plot(t,u[:,2],color='blue')
+axs[0].scatter(t_obs,pi_obs,color='blue',marker='x')
+axs[0].plot(t,u[:,3],color='red')
+
+axs[0].set(xticks=[])
+axs[1].set_xlabel('t (Hours)',fontsize=12)
+axs[0].set_ylabel('Concentration',fontsize=12)
+axs[1].set_ylabel('Concentration',fontsize=12)
+axs[0].set_title('Inside Cell',fontsize=14)
+axs[1].set_title('Outside Cell',fontsize=14)
+
+custom_lines=[Line2D([0],[0],color='orange',label='5-ALA'),Line2D([0],[0],color='blue',label='PpIX'),Line2D([0],[0],color='red',label='Heme')]
+custom_lines2=[Line2D([0],[0],color='k',label='Simulation'),Line2D([0],[0],marker='x',color='w',markeredgecolor='k',label='Observation')]
+axs[0].legend(handles=custom_lines)
+axs[1].legend(handles=custom_lines2)
+plt.show()
+```
+
+```{python}
+plt.plot(t,u[:,2],color='blue')
+plt.scatter(t_obs,pi_obs,color='blue',marker='x')
+
+plt.xlabel('t (Hours)',fontsize=12)
+plt.ylabel('Fluorescence',fontsize=12)
+
+custom_lines2=[Line2D([0],[0],color='b',label='Simulation'),Line2D([0],[0],marker='x',color='w',markeredgecolor='b',label='Observation')]
+plt.legend(handles=custom_lines2)
+plt.show()
+```
+
+```{python}
+def error_all(params):
+    t,u=model_sim_end(a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r0=params[4],r1=params[5],r2=params[6],km3=params[7])
+    ai_sim=u[n_obs,0]
+    po_sim=u[n_obs,1]
+    pi_sim=u[n_obs,2]
+    hi_sim=u[n_obs,3]
+    return np.sum((ai_sim-ai_obs)**2+(po_sim-po_obs)**2+(pi_sim-pi_obs)**2+(hi_sim-hi_obs)**2)
+```
+
+```{python}
+def likelihood_all(params):
+    t,u=model_sim_end(a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r0=params[4],r1=params[5],r2=params[6],km3=params[7])
+    ai_sim=u[n_obs,0]
+    po_sim=u[n_obs,1]
+    pi_sim=u[n_obs,2]
+    hi_sim=u[n_obs,3]
+```
+
+```{python}
+def error_p(params):
+    t,u=model_sim_end(a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r0=params[4],r1=params[5],r2=params[6],km3=params[7])
+    pi_sim=u[n_obs,2]
+    return np.sum((pi_sim-pi_obs)**2)
+```
+
+```{python}
+def log_likelihood(params):
+    t,u=model_sim_end(a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r0=params[4],r1=params[5],r2=params[6],km3=params[7])
+    pi_sim=u[n_obs,2]
+    return -(len(n_obs)/2)*np.log(2*np.pi*sig_pi**2)-(1/(2*sig_pi**2))*np.sum((pi_obs-pi_sim)**2)
+```
+
+```{python}
+ai_likelihood=np.zeros_like(ai_params)
+ae_likelihood=np.zeros_like(ae_params)
+pi_likelihood=np.zeros_like(pi_params)
+pe_likelihood=np.zeros_like(pe_params)
+r0_likelihood=np.zeros_like(r0_params)
+r1_likelihood=np.zeros_like(r1_params)
+r2_likelihood=np.zeros_like(r2_params)
+km3_likelihood=np.zeros_like(km3_params)
+for i in tqdm(range(ai_params.size)):
+    ai_likelihood[i]=log_likelihood([ai_params[i],0.1,1,0.1,0.03,1,1,0.1])
+    ae_likelihood[i]=log_likelihood([1,ae_params[i],1,0.1,0.03,1,1,0.1])
+    pi_likelihood[i]=log_likelihood([1,0.1,pi_params[i],0.1,0.03,1,1,0.1])
+    pe_likelihood[i]=log_likelihood([1,0.1,1,pe_params[i],0.03,1,1,0.1])
+    r0_likelihood[i]=log_likelihood([1,0.1,1,0.1,r0_params[i],1,1,0.1])
+    r1_likelihood[i]=log_likelihood([1,0.1,1,0.1,0.03,r1_params[i],1,0.1])
+    r2_likelihood[i]=log_likelihood([1,0.1,1,0.1,0.03,1,r2_params[i],0.1])
+    km3_likelihood[i]=log_likelihood([1,0.1,1,0.1,0.03,1,1,km3_params[i]])
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['ai','ae'],['pi','pe'],['r0','r1'],['r2','km3']],layout='constrained',figsize=(8,10))
+
+axs['ai'].axvspan(ai_params[np.argwhere(ai_likelihood-np.max(ai_likelihood)>=-1.921)][0].item(),ai_params[np.argwhere(ai_likelihood-np.max(ai_likelihood)>=-1.921)][-1].item(),color='red',alpha=0.3)
+axs['ai'].axvline(ai_params[np.argwhere(ai_likelihood-np.max(ai_likelihood)>=-1.921)][0].item(),color='r')
+axs['ai'].axvline(ai_params[np.argwhere(ai_likelihood-np.max(ai_likelihood)>=-1.921)][-1].item(),color='r')
+axs['ai'].plot(ai_params,ai_likelihood-np.max(ai_likelihood),color='blue')
+axs['ai'].axvline(1,color='k')
+axs['ai'].axvline(ai_params[np.argmax(ai_likelihood)],color='green')
+
+axs['ae'].axvspan(ae_params[np.argwhere(ae_likelihood-np.max(ae_likelihood)>=-1.921)][0].item(),ae_params[np.argwhere(ae_likelihood-np.max(ae_likelihood)>=-1.921)][-1].item(),color='red',alpha=0.3)
+axs['ae'].axvline(ae_params[np.argwhere(ae_likelihood-np.max(ae_likelihood)>=-1.921)][0].item(),color='r')
+axs['ae'].axvline(ae_params[np.argwhere(ae_likelihood-np.max(ae_likelihood)>=-1.921)][-1].item(),color='r')
+axs['ae'].plot(ae_params,ae_likelihood-np.max(ae_likelihood),color='blue')
+axs['ae'].axvline(0.1,color='k')
+axs['ae'].axvline(ae_params[np.argmax(ae_likelihood)],color='green')
+
+axs['pi'].axvspan(pi_params[np.argwhere(pi_likelihood-np.max(pi_likelihood)>=-1.921)][0].item(),pi_params[np.argwhere(pi_likelihood-np.max(pi_likelihood)>=-1.921)][-1].item(),color='red',alpha=0.3)
+axs['pi'].axvline(pi_params[np.argwhere(pi_likelihood-np.max(pi_likelihood)>=-1.921)][0].item(),color='r')
+axs['pi'].axvline(pi_params[np.argwhere(pi_likelihood-np.max(pi_likelihood)>=-1.921)][-1].item(),color='r')
+axs['pi'].plot(pi_params,pi_likelihood-np.max(pi_likelihood),color='blue')
+axs['pi'].axvline(1,color='k')
+axs['pi'].axvline(pi_params[np.argmax(pi_likelihood)],color='green')
+
+axs['pe'].axvspan(pe_params[np.argwhere(pe_likelihood-np.max(pe_likelihood)>=-1.921)][0].item(),pe_params[np.argwhere(pe_likelihood-np.max(pe_likelihood)>=-1.921)][-1].item(),color='red',alpha=0.3)
+axs['pe'].axvline(pe_params[np.argwhere(pe_likelihood-np.max(pe_likelihood)>=-1.921)][0].item(),color='r')
+axs['pe'].axvline(pe_params[np.argwhere(pe_likelihood-np.max(pe_likelihood)>=-1.921)][-1].item(),color='r')
+axs['pe'].plot(pe_params,pe_likelihood-np.max(pe_likelihood),color='blue')
+axs['pe'].axvline(0.1,color='k')
+axs['pe'].axvline(pe_params[np.argmax(pe_likelihood)],color='green')
+
+axs['r0'].axvspan(r0_params[np.argwhere(r0_likelihood-np.max(r0_likelihood)>=-1.921)][0].item(),r0_params[np.argwhere(r0_likelihood-np.max(r0_likelihood)>=-1.921)][-1].item(),color='red',alpha=0.3)
+axs['r0'].axvline(r0_params[np.argwhere(r0_likelihood-np.max(r0_likelihood)>=-1.921)][0].item(),color='r')
+axs['r0'].axvline(r0_params[np.argwhere(r0_likelihood-np.max(r0_likelihood)>=-1.921)][-1].item(),color='r')
+axs['r0'].plot(r0_params,r0_likelihood-np.max(r0_likelihood),color='blue')
+axs['r0'].axvline(0.03,color='k')
+axs['r0'].axvline(r0_params[np.argmax(r0_likelihood)],color='green')
+
+axs['r1'].axvspan(r1_params[np.argwhere(r1_likelihood-np.max(r1_likelihood)>=-1.921)][0].item(),r1_params[np.argwhere(r1_likelihood-np.max(r1_likelihood)>=-1.921)][-1].item(),color='red',alpha=0.3)
+axs['r1'].axvline(r1_params[np.argwhere(r1_likelihood-np.max(r1_likelihood)>=-1.921)][0].item(),color='r')
+axs['r1'].axvline(r1_params[np.argwhere(r1_likelihood-np.max(r1_likelihood)>=-1.921)][-1].item(),color='r')
+axs['r1'].plot(r1_params,r1_likelihood-np.max(r1_likelihood),color='blue')
+axs['r1'].axvline(1,color='k')
+axs['r1'].axvline(r1_params[np.argmax(r1_likelihood)],color='green')
+
+axs['r2'].axvspan(r2_params[np.argwhere(r2_likelihood-np.max(r2_likelihood)>=-1.921)][0].item(),r2_params[np.argwhere(r2_likelihood-np.max(r2_likelihood)>=-1.921)][-1].item(),color='red',alpha=0.3)
+axs['r2'].axvline(r2_params[np.argwhere(r2_likelihood-np.max(r2_likelihood)>=-1.921)][0].item(),color='r')
+axs['r2'].axvline(r2_params[np.argwhere(r2_likelihood-np.max(r2_likelihood)>=-1.921)][-1].item(),color='r')
+axs['r2'].plot(r2_params,r2_likelihood-np.max(r2_likelihood),color='blue')
+axs['r2'].axvline(1,color='k')
+axs['r2'].axvline(r2_params[np.argmax(r2_likelihood)],color='green')
+
+axs['km3'].axvspan(km3_params[np.argwhere(km3_likelihood-np.max(km3_likelihood)>=-1.921)][0].item(),km3_params[np.argwhere(km3_likelihood-np.max(km3_likelihood)>=-1.921)][-1].item(),color='red',alpha=0.3)
+axs['km3'].axvline(km3_params[np.argwhere(km3_likelihood-np.max(km3_likelihood)>=-1.921)][0].item(),color='r')
+axs['km3'].axvline(km3_params[np.argwhere(km3_likelihood-np.max(km3_likelihood)>=-1.921)][-1].item(),color='r')
+axs['km3'].plot(km3_params,km3_likelihood-np.max(km3_likelihood),color='blue')
+axs['km3'].axvline(0.1,color='k')
+axs['km3'].axvline(km3_params[np.argmax(km3_likelihood)],color='green')
+
+axs['ai'].set(xticks=[])
+axs['ae'].set(xticks=[])
+axs['pi'].set(xticks=[])
+axs['pe'].set(xticks=[])
+axs['r0'].set(xticks=[])
+axs['r1'].set(xticks=[])
+
+axs['ai'].set_xlabel(r'$\alpha_{A_i}$',fontsize=15)
+axs['ae'].set_xlabel(r'$\alpha_{A_e}$',fontsize=15)
+axs['pi'].set_xlabel(r'$\alpha_{P_i}$',fontsize=15)
+axs['pe'].set_xlabel(r'$\alpha_{P_e}$',fontsize=15)
+axs['r0'].set_xlabel(r'$r_0$',fontsize=15)
+axs['r1'].set_xlabel(r'$r_1$',fontsize=15)
+axs['r2'].set_xlabel(r'$r_2$',fontsize=15)
+axs['km3'].set_xlabel(r'$k_{-3}$',fontsize=15)
+
+axs['ai'].set_ylabel('Normalised\nlog-likelihood',fontsize=15)
+axs['pi'].set_ylabel('Normalised\nlog-likelihood',fontsize=15)
+axs['r0'].set_ylabel('Normalised\nlog-likelihood',fontsize=15)
+axs['r2'].set_ylabel('Normalised\nlog-likelihood',fontsize=15)
+
+plt.show()
+```

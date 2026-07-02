@@ -1,0 +1,830 @@
+---
+title: "Data Fitting"
+format: 
+    html: 
+        code-fold: true
+        lightbox: true
+        code-overflow: wrap
+---
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+import scipy
+from tqdm import tqdm
+```
+
+```{python}
+def model_sim(end=12,ao=1,a_i=1,a_e=0.1,p_i=1,p_e=0.1,r1=1,r2=1,km3=0.1,VW=1e-3,VT=4e-3,a0=0.1,p0=0.1,h0=0.1):
+    t=np.linspace(0,end,10*end)
+    dt=t[1]-t[0]
+
+    ai,po,pi,hi=np.zeros(t.size),np.zeros(t.size),np.zeros(t.size),np.zeros(t.size)
+    ai[0],pi[0],hi[0]=a0,p0,h0
+    u=np.zeros((t.size,4))
+    u[0]=np.array([ai[0],po[0],pi[0],hi[0]])
+    V=VW/VT
+
+    A=np.array([[1+dt*(a_e+r1),0,0,0],[0,(1+dt*p_i),-dt*p_e,0],[-r1*dt,-dt*p_i,1+dt*p_e+dt*r2,0],[0,0,-dt*r2,1+dt*km3]])
+    for k in range(t.size-1):
+        u[k+1]=(np.linalg.inv(A)@(u[k].reshape(-1,1)+np.array([dt*a_i*ao,0,0,0]).reshape(-1,1))).reshape(1,4)
+    return t,u
+```
+
+```{python}
+t,u=model_sim(end=24)
+```
+
+```{python}
+fig,axs=plt.subplots(2,1,layout='constrained',sharex='all',figsize=(5,4))
+axs[0].plot(t,u[:,0],color='orange')
+axs[1].plot(t,u[:,1],color='blue',linestyle='--')
+axs[0].plot(t,u[:,2],color='blue')
+axs[0].plot(t,u[:,3],color='red')
+
+axs[0].set(title='Inside Cells',ylabel='Concentration')
+axs[1].set(title='Outside Cells',xlabel='t (Hours)',ylabel='Concentration')
+
+custom_lines_in=[Line2D([0],[0],color='orange',label='5-ALA'),Line2D([0],[0],color='blue',label='PpIX'),Line2D([0],[0],color='red',label='Heme')]
+custom_lines_out=[Line2D([0],[0],color='blue',linestyle='--',label='PpIX')]
+axs[0].legend(handles=custom_lines_in)
+axs[1].legend(handles=custom_lines_out)
+
+plt.show()
+```
+
+# Ihata data
+
+Ihata et al. measured fluorescence levels of cells in normoxic and hypoxic conditions.
+
+```{python}
+hgg13_norm=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG13_normoxia.csv",header=None)
+hgg13_hyp=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG13_hypoxia.csv",header=None)
+hgg30_norm=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG30_normoxia.csv")
+hgg30_hyp=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG30_hypoxia.csv",header=None)
+hgg146_norm=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG146_normoxia.csv",header=None)
+hgg146_hyp=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG146_hypoxia.csv",header=None)
+hgg157_norm=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG157_normoxia.csv",header=None)
+hgg157_hyp=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG157_hypoxia.csv",header=None)
+hgg528_norm=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG528_normoxia.csv",header=None)
+hgg528_hyp=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG528_hypoxia.csv",header=None)
+hgg1123_norm=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG1123_normoxia.csv",header=None)
+hgg1123_hyp=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Hypoxia_Data/HGG1123_hypoxia.csv",header=None)
+```
+
+```{python}
+data=pd.DataFrame({'norm_13':hgg13_norm[1],'hyp_13':hgg13_hyp[1],'norm_30':hgg30_norm['HGG30_norm'],'hyp_30':hgg30_hyp[1],'norm_146':hgg146_norm[1],'hyp_146':hgg146_hyp[1],'norm_157':hgg157_norm[1],'hyp_157':hgg157_hyp[1],'norm_528':hgg528_norm[1],'hyp_528':hgg528_hyp[1],
+'norm_1123':hgg1123_norm[1],'hyp_1123':hgg1123_hyp[1]})
+t_data=np.arange(0,9,1)
+```
+
+```{python}
+data.loc[0,'hyp_13']=data.loc[0,'norm_13']
+data.loc[0,'norm_528']=-data.loc[0,'norm_528']
+data.loc[0,'hyp_528']=-data.loc[0,'hyp_528']
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['13','30','146'],['157','528','1123']],layout='constrained')
+
+axs['13'].scatter(t_data,data['norm_13'],color='blue',marker='x')
+axs['13'].scatter(t_data,data['hyp_13'],color='red',marker='x')
+axs['13'].set(xticks=[])
+axs['13'].set_title('HGG13',fontsize=15,weight='bold')
+
+axs['30'].scatter(t_data,data['norm_30'],color='blue',marker='x')
+axs['30'].scatter(t_data,data['hyp_30'],color='red',marker='x')
+axs['30'].set(xticks=[])
+axs['30'].set_title('HGG13',fontsize=15,weight='bold')
+
+axs['146'].scatter(t_data,data['norm_146'],color='blue',marker='x')
+axs['146'].scatter(t_data,data['hyp_146'],color='red',marker='x')
+axs['146'].set(xticks=[])
+axs['146'].set_title('HGG146',fontsize=15,weight='bold')
+
+axs['157'].scatter(t_data,data['norm_157'],marker='x',color='b')
+axs['157'].scatter(t_data,data['hyp_157'],color='red',marker='x')
+axs['157'].set_title('HGG157',fontsize=15,weight='bold')
+
+axs['528'].scatter(t_data,data['norm_528'],color='b',marker='x')
+axs['528'].scatter(t_data,data['hyp_528'],color='red',marker='x')
+axs['528'].set_title('HGG528',fontsize=15,weight='bold')
+
+axs['1123'].scatter(t_data,data['norm_1123'],color='b',marker='x')
+axs['1123'].scatter(t_data,data['hyp_1123'],color='red',marker='x')
+axs['1123'].set_title('HGG1123',fontsize=15,weight='bold')
+
+axs['13'].set_ylabel('Fluorescence')
+axs['157'].set_ylabel('Fluorescence')
+
+axs['157'].set_xlabel('t (Hours)')
+axs['528'].set_xlabel('t (Hours)')
+axs['1123'].set_xlabel('t (Hours)')
+
+plt.show()
+```
+
+## Data Fitting
+
+We can fit the model to the data by minimizing the least square error.
+
+```{python}
+n=10
+n_obs=[0,n*1,n*2,n*3,n*4,n*5,n*6,n*7,-1]
+```
+
+### HGG13
+
+```{python}
+def error_13(params):
+    t,u_norm=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=data.loc[0,'norm_13'])
+    t,u_hyp=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[7],r2=params[5],km3=params[6],p0=data.loc[0,'hyp_13'])
+    norm_obs=u_norm[n_obs,2]
+    hyp_obs=u_hyp[n_obs,2]
+    return np.mean((norm_obs-data['norm_13'])**2)+np.mean((hyp_obs-data['hyp_13'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_13=scipy.optimize.minimize(error_13,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_13=eqn_min_13.x
+t,u_norm_13=model_sim(end=8,a_i=params_13[0],a_e=params_13[1],p_i=params_13[2],p_e=params_13[3],r1=params_13[4],r2=params_13[5],km3=params_13[6],p0=data.loc[0,'norm_13'])
+t,u_hyp_13=model_sim(end=8,a_i=params_13[0],a_e=params_13[1],p_i=params_13[2],p_e=params_13[3],r1=params_13[7],r2=params_13[5],km3=params_13[6],p0=data.loc[0,'hyp_13'])
+```
+
+```{python}
+plt.scatter(t_data,data['norm_13'],color='blue',marker='x')
+plt.scatter(t_data,data['hyp_13'],color='red',marker='x')
+plt.plot(t,u_norm_13[:,2],color='blue')
+plt.plot(t,u_hyp_13[:,2],color='red')
+plt.annotate(f'$r_c$: {np.round(params_13[4],3)}',(0.5,600))
+plt.annotate(f'$r_h$: {np.round(params_13[7],3)}',(0.5,550))
+plt.annotate(f'$\gamma$: {np.round(np.round(params_13[4],3)/np.round(params_13[7],3),3)}',(2,575))
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### HGG30
+
+```{python}
+def error_30(params):
+    t,u_norm=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=data.loc[0,'norm_30'])
+    t,u_hyp=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[7],r2=params[5],km3=params[6],p0=data.loc[0,'hyp_30'])
+    norm_obs=u_norm[n_obs,2]
+    hyp_obs=u_hyp[n_obs,2]
+    return np.mean((norm_obs-data['norm_30'])**2)+np.mean((hyp_obs-data['hyp_30'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_30=scipy.optimize.minimize(error_30,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_30=eqn_min_30.x
+t,u_norm_30=model_sim(end=8,a_i=params_30[0],a_e=params_30[1],p_i=params_30[2],p_e=params_30[3],r1=params_30[4],r2=params_30[5],km3=params_30[6],p0=data.loc[0,'norm_30'])
+t,u_hyp_30=model_sim(end=8,a_i=params_30[0],a_e=params_30[1],p_i=params_30[2],p_e=params_30[3],r1=params_30[7],r2=params_30[5],km3=params_30[6],p0=data.loc[0,'hyp_30'])
+```
+
+```{python}
+plt.scatter(t_data,data['norm_30'],color='blue',marker='x')
+plt.scatter(t_data,data['hyp_30'],color='red',marker='x')
+plt.plot(t,u_norm_30[:,2],color='blue')
+plt.plot(t,u_hyp_30[:,2],color='red')
+plt.annotate(f'$r_c$: {np.round(params_30[4],3)}',(0.5,600))
+plt.annotate(f'$r_h$: {np.round(params_30[7],3)}',(0.5,550))
+plt.annotate(f'$\gamma$: {np.round(np.round(params_30[4],3)/np.round(params_30[7],3),3)}',(2,575))
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### HGG146
+
+```{python}
+def error_146(params):
+    t,u_norm=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=data.loc[0,'norm_146'])
+    t,u_hyp=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[7],r2=params[5],km3=params[6],p0=data.loc[0,'hyp_146'])
+    norm_obs=u_norm[n_obs,2]
+    hyp_obs=u_hyp[n_obs,2]
+    return np.mean((norm_obs-data['norm_146'])**2)+np.mean((hyp_obs-data['hyp_146'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_146=scipy.optimize.minimize(error_146,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_146=eqn_min_146.x
+t,u_norm_146=model_sim(end=8,a_i=params_146[0],a_e=params_146[1],p_i=params_146[2],p_e=params_146[3],r1=params_146[4],r2=params_146[5],km3=params_146[6],p0=data.loc[0,'norm_146'])
+t,u_hyp_146=model_sim(end=8,a_i=params_146[0],a_e=params_146[1],p_i=params_146[2],p_e=params_146[3],r1=params_146[7],r2=params_146[5],km3=params_146[6],p0=data.loc[0,'hyp_146'])
+```
+
+```{python}
+plt.scatter(t_data,data['norm_146'],color='blue',marker='x')
+plt.scatter(t_data,data['hyp_146'],color='red',marker='x')
+plt.plot(t,u_norm_146[:,2],color='blue')
+plt.plot(t,u_hyp_146[:,2],color='red')
+plt.annotate(f'$r_c$: {np.round(params_146[4],3)}',(0.5,130))
+plt.annotate(f'$r_h$: {np.round(params_146[7],3)}',(0.5,120))
+plt.annotate(f'$\gamma$: {np.round(np.round(params_146[4],3)/np.round(params_146[7],3),3)}',(2.5,125))
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### HGG157
+
+```{python}
+def error_157(params):
+    t,u_norm=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=data.loc[0,'norm_157'])
+    t,u_hyp=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[7],r2=params[5],km3=params[6],p0=data.loc[0,'hyp_157'])
+    norm_obs=u_norm[n_obs,2]
+    hyp_obs=u_hyp[n_obs,2]
+    return np.mean((norm_obs-data['norm_157'])**2)+np.mean((hyp_obs-data['hyp_157'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_157=scipy.optimize.minimize(error_157,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_157=eqn_min_157.x
+t,u_norm_157=model_sim(end=8,a_i=params_157[0],a_e=params_157[1],p_i=params_157[2],p_e=params_157[3],r1=params_157[4],r2=params_157[5],km3=params_157[6],p0=data.loc[0,'norm_157'])
+t,u_hyp_157=model_sim(end=8,a_i=params_157[0],a_e=params_157[1],p_i=params_157[2],p_e=params_157[3],r1=params_157[7],r2=params_157[5],km3=params_157[6],p0=data.loc[0,'hyp_157'])
+```
+
+```{python}
+plt.scatter(t_data,data['norm_157'],color='blue',marker='x')
+plt.scatter(t_data,data['hyp_157'],color='red',marker='x')
+plt.plot(t,u_norm_157[:,2],color='blue')
+plt.plot(t,u_hyp_157[:,2],color='red')
+plt.annotate(f'$r_c$: {np.round(params_157[4],3)}',(0.5,600))
+plt.annotate(f'$r_h$: {np.round(params_157[7],3)}',(0.5,550))
+plt.annotate(f'$\gamma$: {np.round(np.round(params_157[4],3)/np.round(params_157[7],3),3)}',(2,575))
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### HGG528
+
+```{python}
+def error_528(params):
+    t,u_norm=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=data.loc[0,'norm_528'])
+    t,u_hyp=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[7],r2=params[5],km3=params[6],p0=data.loc[0,'hyp_528'])
+    norm_obs=u_norm[n_obs,2]
+    hyp_obs=u_hyp[n_obs,2]
+    return np.mean((norm_obs-data['norm_528'])**2)+np.mean((hyp_obs-data['hyp_528'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_528=scipy.optimize.minimize(error_528,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_528=eqn_min_528.x
+t,u_norm_528=model_sim(end=8,a_i=params_528[0],a_e=params_528[1],p_i=params_528[2],p_e=params_528[3],r1=params_528[4],r2=params_528[5],km3=params_528[6],p0=data.loc[0,'norm_528'])
+t,u_hyp_528=model_sim(end=8,a_i=params_528[0],a_e=params_528[1],p_i=params_528[2],p_e=params_528[3],r1=params_528[7],r2=params_528[5],km3=params_528[6],p0=data.loc[0,'hyp_528'])
+```
+
+```{python}
+plt.scatter(t_data,data['norm_528'],color='blue',marker='x')
+plt.scatter(t_data,data['hyp_528'],color='red',marker='x')
+plt.plot(t,u_norm_528[:,2],color='blue')
+plt.plot(t,u_hyp_528[:,2],color='red')
+plt.annotate(f'$r_c$: {np.round(params_528[4],3)}',(0.5,300))
+plt.annotate(f'$r_h$: {np.round(params_528[7],3)}',(0.5,280))
+plt.annotate(f'$\gamma$: {np.round(np.round(params_528[4],3)/np.round(params_528[7],3),3)}',(2,290))
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### HGG1123
+
+```{python}
+def error_1123(params):
+    t,u_norm=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=data.loc[0,'norm_1123'])
+    t,u_hyp=model_sim(end=8,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[7],r2=params[5],km3=params[6],p0=data.loc[0,'hyp_1123'])
+    norm_obs=u_norm[n_obs,2]
+    hyp_obs=u_hyp[n_obs,2]
+    return np.mean((norm_obs-data['norm_1123'])**2)+np.mean((hyp_obs-data['hyp_1123'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_1123=scipy.optimize.minimize(error_1123,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_1123=eqn_min_1123.x
+t,u_norm_1123=model_sim(end=8,a_i=params_1123[0],a_e=params_1123[1],p_i=params_1123[2],p_e=params_1123[3],r1=params_1123[4],r2=params_1123[5],km3=params_1123[6],p0=data.loc[0,'norm_1123'])
+t,u_hyp_1123=model_sim(end=8,a_i=params_1123[0],a_e=params_1123[1],p_i=params_1123[2],p_e=params_1123[3],r1=params_1123[7],r2=params_1123[5],km3=params_1123[6],p0=data.loc[0,'hyp_1123'])
+```
+
+```{python}
+plt.scatter(t_data,data['norm_1123'],color='blue',marker='x')
+plt.scatter(t_data,data['hyp_1123'],color='red',marker='x')
+plt.plot(t,u_norm_1123[:,2],color='blue')
+plt.plot(t,u_hyp_1123[:,2],color='red')
+plt.annotate(f'$r_c$: {np.round(params_1123[4],3)}',(0.5,600))
+plt.annotate(f'$r_h$: {np.round(params_1123[7],3)}',(0.5,550))
+plt.annotate(f'$\gamma$: {np.round(np.round(params_1123[4],3)/np.round(params_1123[7],3),3)}',(2,575))
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+## Figure
+
+```{python}
+fig,axs=plt.subplot_mosaic([['13','30','146'],['157','528','1123']],layout='constrained',figsize=(10,6))
+
+axs['13'].plot(t,u_norm_13[:,2],color='blue')
+axs['13'].plot(t,u_hyp_13[:,2],color='red')
+axs['13'].scatter(t_data,data['norm_13'],color='b',marker='x')
+axs['13'].scatter(t_data,data['hyp_13'],color='r',marker='x')
+
+axs['13'].annotate(f'$\gamma=$ {np.round(np.round(params_13[4],3)/np.round(params_13[7],3),2)}',(0.9,600),fontsize=13)
+
+axs['13'].set(xticks=[])
+axs['13'].set_title('HGG13',fontsize=15,weight='bold')
+
+axs['30'].plot(t,u_norm_30[:,2],color='blue')
+axs['30'].plot(t,u_hyp_30[:,2],color='red')
+axs['30'].scatter(t_data,data['norm_30'],color='b',marker='x')
+axs['30'].scatter(t_data,data['hyp_30'],color='r',marker='x')
+
+axs['30'].annotate(f'$\gamma=$ {np.round(np.round(params_30[4],3)/np.round(params_30[7],3),2)}',(0.9,900),fontsize=13)
+
+axs['30'].set(xticks=[])
+axs['30'].set_title('HGG30',fontsize=15,weight='bold')
+
+axs['146'].plot(t,u_norm_146[:,2],color='blue')
+axs['146'].plot(t,u_hyp_146[:,2],color='red')
+axs['146'].scatter(t_data,data['norm_146'],color='b',marker='x')
+axs['146'].scatter(t_data,data['hyp_146'],color='r',marker='x')
+
+axs['146'].annotate(f'$\gamma=$ {np.round(np.round(params_146[4],3)/np.round(params_146[7],3),2)}',(0.9,143),fontsize=13)
+
+axs['146'].set(xticks=[])
+axs['146'].set_title('HGG146',fontsize=15,weight='bold')
+
+axs['157'].plot(t,u_norm_157[:,2],color='blue')
+axs['157'].plot(t,u_hyp_157[:,2],color='red')
+axs['157'].scatter(t_data,data['norm_157'],color='b',marker='x')
+axs['157'].scatter(t_data,data['hyp_157'],color='r',marker='x')
+
+axs['157'].annotate(f'$\gamma=$ {np.round(np.round(params_157[4],3)/np.round(params_157[7],3),2)}',(0.9,600),fontsize=13)
+
+axs['157'].set(xticks=t_data)
+axs['157'].set_title('HGG157',fontsize=15,weight='bold')
+
+axs['528'].plot(t,u_norm_528[:,2],color='blue')
+axs['528'].plot(t,u_hyp_528[:,2],color='red')
+axs['528'].scatter(t_data,data['norm_528'],color='b',marker='x')
+axs['528'].scatter(t_data,data['hyp_528'],color='r',marker='x')
+
+axs['528'].annotate(f'$\gamma=$ {np.round(np.round(params_528[4],3)/np.round(params_528[7],3),2)}',(0.9,360),fontsize=13)
+
+axs['528'].set(xticks=t_data)
+axs['528'].set_title('HGG528',fontsize=15,weight='bold')
+
+axs['1123'].plot(t,u_norm_1123[:,2],color='blue')
+axs['1123'].plot(t,u_hyp_1123[:,2],color='red')
+axs['1123'].scatter(t_data,data['norm_1123'],color='b',marker='x')
+axs['1123'].scatter(t_data,data['hyp_1123'],color='r',marker='x')
+
+axs['1123'].annotate(f'$\gamma=$ {np.round(np.round(params_1123[4],3)/np.round(params_1123[7],3),2)}',(0.9,540),fontsize=13)
+
+axs['1123'].set(xticks=t_data)
+axs['1123'].set_title('HGG1123',fontsize=15,weight='bold')
+
+axs['13'].set_ylabel('Fluorescence',fontsize=13)
+axs['157'].set_ylabel('Fluorescence',fontsize=13)
+
+axs['157'].set_xlabel('t (Hours)',fontsize=13)
+axs['528'].set_xlabel('t (Hours)',fontsize=13)
+axs['1123'].set_xlabel('t (Hours)',fontsize=13)
+
+custom_lines=[Line2D([0],[0],marker='x',color='w',markeredgecolor='k',label='Data'),Line2D([0],[0],color='k',label='Model Fit'),Line2D([0],[0],color='b',label='Normoxic'),Line2D([0],[0],color='r',label='Hypoxic')]
+fig.legend(handles=custom_lines,ncol=4,bbox_to_anchor=(0.83,0),fontsize=13)
+
+plt.show()
+```
+
+# Schwake data
+
+Schwake measured fluorescence levels of patients in different 5-ALA medium conditions.
+
+```{python}
+#import data
+u87=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Data/Schwake/Schwake_U87.csv")
+c6=pd.read_csv("C:/Users/pmxcb7/OneDrive - The University of Nottingham/5ALA/Data/Schwake/Schwake_C6.csv")
+t_obs=u87['Hour']
+u87.index=u87['Hour']
+u87=u87.drop(columns=['Hour'])
+c6.index=c6['Hour']
+c6=c6.drop(columns=['Hour'])
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['U87','C6']],layout='constrained')
+
+axs['U87'].scatter(t_obs,u87['Cont'],color='green')
+axs['U87'].scatter(t_obs,u87['No'],color='red')
+axs['U87'].plot(t_obs,u87['Cont'],color='green')
+axs['U87'].plot(t_obs,u87['No'],color='red')
+
+axs['C6'].scatter(t_obs,c6['Cont'],color='green')
+axs['C6'].scatter(t_obs,c6['No'],color='red')
+axs['C6'].plot(t_obs,c6['Cont'],color='green')
+axs['C6'].plot(t_obs,c6['No'],color='red')
+
+axs['U87'].set(title='U87',xlabel='t (Hours)',ylabel='Fluorescence')
+axs['C6'].set(title='C6',xlabel='t (Hours)')
+
+plt.show()
+```
+
+```{python}
+n=10
+n_obs=[0,n*1,n*3,n*6,n*9,n*12,-1]
+```
+
+## Data Fitting
+
+We can fit this data the same as above.
+
+```{python}
+def error_u87(params):
+    t,u_cont=model_sim(end=24,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=u87.loc[0,'Cont'],a0=5)
+    t,u_no=model_sim(end=24,ao=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=u87.loc[0,'No'],a0=5)
+    p_cont_obs=u_cont[n_obs,2]
+    p_no_obs=u_no[n_obs,2]
+    return np.mean((p_cont_obs-u87['Cont'])**2)+np.mean((p_no_obs-u87['No'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_u87=scipy.optimize.minimize(error_u87,(1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_u87=eqn_min_u87.x
+t,u_cont_u87=model_sim(end=24,a_i=params_u87[0],a_e=params_u87[1],p_i=params_u87[2],p_e=params_u87[3],r1=params_u87[4],r2=params_u87[5],km3=params_u87[6],p0=u87.loc[0,'Cont'],a0=5)
+t,u_no_u87=model_sim(end=24,ao=0,a_i=params_u87[0],a_e=params_u87[1],p_i=params_u87[2],p_e=params_u87[3],r1=params_u87[4],r2=params_u87[5],km3=params_u87[6],p0=u87.loc[0,'No'],a0=5)
+```
+
+```{python}
+plt.scatter(t_obs,u87['Cont'],color='green')
+plt.scatter(t_obs,u87['No'],color='red')
+plt.plot(t,u_cont_u87[:,2],color='green')
+plt.plot(t,u_no_u87[:,2],color='red')
+
+plt.title('U87')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+
+plt.show()
+```
+
+```{python}
+def error_c6(params):
+    t,u_cont=model_sim(end=24,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=c6.loc[0,'Cont'],a0=1)
+    t,u_no=model_sim(end=24,ao=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],km3=params[6],p0=c6.loc[0,'No'],a0=1)
+    p_cont_obs=u_cont[n_obs,2]
+    p_no_obs=u_no[n_obs,2]
+    return np.mean((p_cont_obs-c6['Cont'])**2)+np.mean((p_no_obs-c6['No'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_c6=scipy.optimize.minimize(error_c6,(1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_c6=eqn_min_c6.x
+t,u_cont_c6=model_sim(end=24,a_i=params_c6[0],a_e=params_c6[1],p_i=params_c6[2],p_e=params_c6[3],r1=params_c6[4],r2=params_c6[5],km3=params_c6[6],p0=c6.loc[0,'Cont'],a0=1)
+t,u_no_c6=model_sim(end=24,ao=0,a_i=params_c6[0],a_e=params_c6[1],p_i=params_c6[2],p_e=params_c6[3],r1=params_c6[4],r2=params_c6[5],km3=params_c6[6],p0=c6.loc[0,'No'],a0=1)
+```
+
+```{python}
+plt.scatter(t_obs,c6['Cont'],color='green')
+plt.scatter(t_obs,c6['No'],color='red')
+plt.plot(t,u_cont_c6[:,2],color='green')
+plt.plot(t,u_no_c6[:,2],color='red')
+
+plt.title('U87')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['U87','C6']],layout='constrained',figsize=(8,4))
+
+axs['U87'].scatter(t_obs,u87['Cont'],color='green',marker='x')
+axs['U87'].scatter(t_obs,u87['No'],color='red',marker='x')
+axs['U87'].plot(t,u_cont_u87[:,2],color='green')
+axs['U87'].plot(t,u_no_u87[:,2],color='red')
+
+axs['C6'].scatter(t_obs,c6['Cont'],color='green',marker='x')
+axs['C6'].scatter(t_obs,c6['No'],color='red',marker='x')
+axs['C6'].plot(t,u_cont_c6[:,2],color='green')
+axs['C6'].plot(t,u_no_c6[:,2],color='red')
+
+axs['U87'].set_title('U87',fontsize=15)
+axs['U87'].set_xlabel('t (Hours)',fontsize=13)
+axs['U87'].set_ylabel('Fluorescence',fontsize=13)
+axs['C6'].set_title('C6',fontsize=15)
+axs['C6'].set_xlabel('t (Hours)',fontsize=13)
+
+custom_lines=[Line2D([0],[0],marker='x',color='w',markeredgecolor='k',label='Data'),Line2D([0],[0],color='k',label='Model Fit'),Line2D([0],[0],color='green',label='Continuous 5-ALA Medium'),Line2D([0],[0],color='red',label='No 5-ALA Medium')]
+fig.legend(handles=custom_lines,ncol=4,bbox_to_anchor=(1,0),fontsize=12)
+fig.suptitle('No Endodgenous Term')
+
+plt.show()
+```
+
+# Endodgenous 5-ALA
+
+```{python}
+def model_sim_end(end=12,ao=1,a_i=1,a_e=0.1,p_i=1,p_e=0.1,r1=1,r2=1,r0=0.03,km3=0.1,VW=1e-3,VT=4e-3,a0=0.1,p0=0.1,h0=0.1):
+    t=np.linspace(0,end,10*end)
+    dt=t[1]-t[0]
+
+    ai,po,pi,hi=np.zeros(t.size),np.zeros(t.size),np.zeros(t.size),np.zeros(t.size)
+    ai[0],pi[0],hi[0]=a0,p0,h0
+    u=np.zeros((t.size,4))
+    u[0]=np.array([ai[0],po[0],pi[0],hi[0]])
+    V=VW/VT
+
+    A=np.array([[1+dt*(a_e+r1),0,0,0],[0,(1+dt*p_i),-dt*p_e,0],[-r1*dt,-dt*p_i,1+dt*p_e+dt*r2,0],[0,0,-dt*r2,1+dt*km3]])
+    for k in range(t.size-1):
+        u[k+1]=(np.linalg.inv(A)@(u[k].reshape(-1,1)+np.array([dt*a_i*ao+dt*r0,0,0,0]).reshape(-1,1))).reshape(1,4)
+    return t,u
+```
+
+```{python}
+t,u=model_sim_end()
+```
+
+```{python}
+fig,axs=plt.subplots(2,1,layout='constrained',sharex='all',figsize=(5,4))
+axs[0].plot(t,u[:,0],color='orange')
+axs[1].plot(t,u[:,1],color='blue',linestyle='--')
+axs[0].plot(t,u[:,2],color='blue')
+axs[0].plot(t,u[:,3],color='red')
+
+axs[0].set(title='Inside Cell',ylabel='Concentration')
+axs[1].set(title='Outside Cell',xlabel='t (Hours)',ylabel='Concentration')
+
+custom_lines_in=[Line2D([0],[0],color='orange',label='5-ALA'),Line2D([0],[0],color='blue',label='PpIX'),Line2D([0],[0],color='red',label='Heme')]
+custom_lines_out=[Line2D([0],[0],color='blue',linestyle='--',label='PpIX')]
+axs[0].legend(handles=custom_lines_in)
+axs[1].legend(handles=custom_lines_out)
+
+plt.show()
+```
+
+## Schwake Data Fit
+
+### No scaling
+
+```{python}
+def end_error_u87(params):
+    t,u_cont=model_sim_end(end=24,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=u87.loc[0,'Cont'],a0=5)
+    t,u_no=model_sim_end(end=24,ao=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=u87.loc[0,'No'],a0=5)
+    p_cont_obs=u_cont[n_obs,2]
+    p_no_obs=u_no[n_obs,2]
+    return np.mean((p_cont_obs-u87['Cont'])**2)+np.mean((p_no_obs-u87['No'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_u87=scipy.optimize.minimize(end_error_u87,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_u87=eqn_min_u87.x
+t,u_cont_u87=model_sim_end(end=24,a_i=params_u87[0],a_e=params_u87[1],p_i=params_u87[2],p_e=params_u87[3],r1=params_u87[4],r2=params_u87[5],r0=params_u87[6],km3=params_u87[6],p0=u87.loc[0,'Cont'],a0=5)
+t,u_no_u87=model_sim_end(end=24,ao=0,a_i=params_u87[0],a_e=params_u87[1],p_i=params_u87[2],p_e=params_u87[3],r1=params_u87[4],r2=params_u87[5],r0=params_u87[6],km3=params_u87[6],p0=u87.loc[0,'No'],a0=5)
+```
+
+```{python}
+plt.scatter(t_obs,u87['Cont'],color='green')
+plt.scatter(t_obs,u87['No'],color='red')
+plt.plot(t,u_cont_u87[:,2],color='green')
+plt.plot(t,u_no_u87[:,2],color='red')
+
+plt.title('U87')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+
+plt.show()
+```
+
+```{python}
+def end_error_c6(params):
+    t,u_cont=model_sim_end(end=24,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=c6.loc[0,'Cont'],a0=5)
+    t,u_no=model_sim_end(end=24,ao=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=c6.loc[0,'No'],a0=5)
+    p_cont_obs=u_cont[n_obs,2]
+    p_no_obs=u_no[n_obs,2]
+    return np.mean((p_cont_obs-c6['Cont'])**2)+np.mean((p_no_obs-c6['No'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_c6=scipy.optimize.minimize(end_error_c6,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params_c6=eqn_min_c6.x
+t,u_cont_c6=model_sim_end(end=24,a_i=params_c6[0],a_e=params_c6[1],p_i=params_c6[2],p_e=params_c6[3],r1=params_c6[4],r2=params_c6[5],r0=params_c6[6],km3=params_c6[6],p0=c6.loc[0,'Cont'],a0=5)
+t,u_no_c6=model_sim_end(end=24,ao=0,a_i=params_c6[0],a_e=params_c6[1],p_i=params_c6[2],p_e=params_c6[3],r1=params_c6[4],r2=params_c6[5],r0=params_c6[6],km3=params_c6[6],p0=c6.loc[0,'No'],a0=5)
+```
+
+```{python}
+plt.scatter(t_obs,c6['Cont'],color='green')
+plt.scatter(t_obs,c6['No'],color='red')
+plt.plot(t,u_cont_c6[:,2],color='green')
+plt.plot(t,u_no_c6[:,2],color='red')
+
+plt.title('C6')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['U87','C6']],layout='constrained',figsize=(8,4))
+
+axs['U87'].scatter(t_obs,u87['Cont'],color='green',marker='x')
+axs['U87'].scatter(t_obs,u87['No'],color='red',marker='x')
+axs['U87'].plot(t,u_cont_u87[:,2],color='green')
+axs['U87'].plot(t,u_no_u87[:,2],color='red')
+
+axs['C6'].scatter(t_obs,c6['Cont'],color='green',marker='x')
+axs['C6'].scatter(t_obs,c6['No'],color='red',marker='x')
+axs['C6'].plot(t,u_cont_c6[:,2],color='green')
+axs['C6'].plot(t,u_no_c6[:,2],color='red')
+
+axs['U87'].set_title('U87',fontsize=15)
+axs['U87'].set_xlabel('t (Hours)',fontsize=13)
+axs['U87'].set_ylabel('Fluorescence',fontsize=13)
+axs['C6'].set_title('C6',fontsize=15)
+axs['C6'].set_xlabel('t (Hours)',fontsize=13)
+
+custom_lines=[Line2D([0],[0],marker='x',color='w',markeredgecolor='k',label='Data'),Line2D([0],[0],color='k',label='Model Fit'),Line2D([0],[0],color='green',label='Continuous 5-ALA Medium'),Line2D([0],[0],color='red',label='No 5-ALA Medium')]
+fig.legend(handles=custom_lines,ncol=4,bbox_to_anchor=(1,0),fontsize=12)
+fig.suptitle('Including Endodgenous Term')
+
+plt.show()
+```
+
+## Non-continuous data
+
+```{python}
+def no_cont_sim(end=12,time=1,ao1=1,ao2=1,a_i=1,a_e=0.1,p_i=1,p_e=0.1,r1=1,r2=1,r0=0.03,km3=0.1,VW=1e-3,VT=4e-3,a0=0.1,p0=0.1,h0=0.1):
+    t=np.linspace(0,end,10*end)
+    dt=t[1]-t[0]
+
+    ai,po,pi,hi=np.zeros(t.size),np.zeros(t.size),np.zeros(t.size),np.zeros(t.size)
+    ao_array=np.zeros(t.size)
+    for k in range(t.size-1):
+        if t[k]<=time:
+            ao_array[k]=ao1
+        else:
+            ao_array[k]=ao2
+    ai[0],pi[0],hi[0]=a0,p0,h0
+    u=np.zeros((t.size,4))
+    u[0]=np.array([ai[0],po[0],pi[0],hi[0]])
+    V=VW/VT
+
+    A=np.array([[1+dt*(a_e+r1),0,0,0],[0,(1+dt*p_i),-dt*p_e,0],[-r1*dt,-dt*p_i,1+dt*p_e+dt*r2,0],[0,0,-dt*r2,1+dt*km3]])
+    for k in range(t.size-1):
+        ao=ao_array[k]
+        u[k+1]=(np.linalg.inv(A)@(u[k].reshape(-1,1)+np.array([dt*a_i*ao+dt*r0,0,0,0]).reshape(-1,1))).reshape(1,4)
+    return t,u   
+```
+
+```{python}
+t,u=no_cont_sim(ao1=1,ao2=0,time=1)
+```
+
+```{python}
+fig,axs=plt.subplots(2,1,layout='constrained',sharex='all')
+axs[0].plot(t,u[:,0],color='orange')
+axs[1].plot(t,u[:,1],color='blue',linestyle='--')
+axs[0].plot(t,u[:,2],color='blue')
+axs[0].plot(t,u[:,3],color='red')
+axs[0].set(title='Inside Cell',ylabel='Concentration')
+axs[1].set(title='Outside Cell',xlabel='t (Hours)',ylabel='Concentration')
+plt.show()
+```
+
+### U87
+
+```{python}
+plt.scatter(t_obs,u87['Cont'],color='green',marker='x')
+plt.scatter(t_obs,u87['Initial'],color='orange',marker='x')
+plt.scatter(t_obs,u87['No'],color='red',marker='x')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+def non_cont_error_u87(params):
+    t,u_cont=no_cont_sim(end=24,ao1=1,ao2=1,time=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=u87.loc[0,'Cont'],a0=5)
+    t,u_init=no_cont_sim(end=24,ao1=1,ao2=0,time=2,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=u87.loc[0,'Initial'],a0=5)
+    t,u_no=no_cont_sim(end=24,ao1=0,ao2=0,time=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=u87.loc[0,'No'],a0=5)
+    p_cont_obs=u_cont[n_obs,2]
+    p_init_obs=u_init[n_obs,2]
+    p_no_obs=u_no[n_obs,2]
+    return np.mean((p_cont_obs-u87['Cont'])**2)+np.mean((p_init_obs-u87['Initial'])**2)+5*np.mean((p_no_obs-u87['No'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_u87_ncont=scipy.optimize.minimize(non_cont_error_u87,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params=eqn_min_u87_ncont.x
+t,u_cont=no_cont_sim(end=24,ao1=1,ao2=1,time=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=u87.loc[0,'Cont'],a0=5)
+t,u_init=no_cont_sim(end=24,ao1=1,ao2=0,time=2,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=u87.loc[0,'Initial'],a0=5)
+t,u_no=no_cont_sim(end=24,ao1=0,ao2=0,time=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=u87.loc[0,'No'],a0=5)
+```
+
+```{python}
+plt.scatter(t_obs,u87['Cont'],color='green',marker='x')
+plt.plot(t,u_cont[:,2],color='green')
+plt.scatter(t_obs,u87['Initial'],color='orange',marker='x')
+plt.plot(t,u_init[:,2],color='orange')
+plt.scatter(t_obs,u87['No'],color='red',marker='x')
+plt.plot(t,u_no[:,2],color='red')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+### C6
+
+```{python}
+plt.scatter(t_obs,c6['Cont'],color='green',marker='x')
+plt.scatter(t_obs,c6['Initial'],color='orange',marker='x')
+plt.scatter(t_obs,c6['No'],color='red',marker='x')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+def non_cont_error_c6(params):
+    t,u_cont=no_cont_sim(end=24,ao1=1,ao2=1,time=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=c6.loc[0,'Cont'],a0=5)
+    t,u_init=no_cont_sim(end=24,ao1=1,ao2=0,time=3,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=c6.loc[0,'Initial'],a0=5)
+    t,u_no=no_cont_sim(end=24,ao1=0,ao2=0,time=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=c6.loc[0,'No'],a0=5)
+    p_cont_obs=u_cont[n_obs,2]
+    p_init_obs=u_init[n_obs,2]
+    p_no_obs=u_no[n_obs,2]
+    return np.mean((p_cont_obs-c6['Cont'])**2)+np.mean((p_init_obs-c6['Initial'])**2)+5*np.mean((p_no_obs-c6['No'])**2)
+```
+
+```{python}
+bnds=((0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None),(0,None))
+eqn_min_c6_ncont=scipy.optimize.minimize(non_cont_error_c6,(1,1,1,1,1,1,1,1),bounds=bnds)
+```
+
+```{python}
+params=eqn_min_c6_ncont.x
+t,u_cont=no_cont_sim(end=24,ao1=1,ao2=1,time=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=c6.loc[0,'Cont'],a0=5)
+t,u_init=no_cont_sim(end=24,ao1=1,ao2=0,time=3,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=c6.loc[0,'Initial'],a0=5)
+t,u_no=no_cont_sim(end=24,ao1=0,ao2=0,time=0,a_i=params[0],a_e=params[1],p_i=params[2],p_e=params[3],r1=params[4],r2=params[5],r0=params[6],km3=params[6],p0=c6.loc[0,'No'],a0=5)
+```
+
+```{python}
+plt.scatter(t_obs,c6['Cont'],color='green',marker='x')
+plt.plot(t,u_cont[:,2],color='green')
+plt.scatter(t_obs,c6['Initial'],color='orange',marker='x')
+plt.plot(t,u_init[:,2],color='orange')
+plt.scatter(t_obs,c6['No'],color='red',marker='x')
+plt.plot(t,u_no[:,2],color='red')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```

@@ -1,0 +1,504 @@
+---
+title: Model Steady States
+format: 
+    html: 
+        toc: true
+        code-fold: true
+        code-overflow: wrap
+---
+
+```{python}
+import numpy as np
+from tqdm import tqdm 
+
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+```
+
+The model is 
+
+$$
+\begin{align}
+\frac{dA_i}{dt}&=\alpha_{A_i}A_0-(\alpha_{A_e}+r_1)A_i, \\
+\frac{dP_o}{dt}&=\alpha_{P_e}P_i-\alpha_{P_i}P_o, \\
+\frac{dP_i}{dt}&=\alpha_{P_i}P_o+r_1A_i-(\alpha_{P_e}+r_2)P_i,\\
+\frac{dH_i}{dt}&=r_2P_i-k_{-3}H_i.
+\end{align}
+$$
+
+## Model Simulation
+
+```{python}
+def model_sim(end=12,ao=1,a_i=1,a_e=0.1,p_i=1,p_e=0.1,r1=1,r2=1,km3=0.1,VW=1e-3,VT=4e-3,a0=0.1,p0=0.1,h0=0.1):
+    t=np.linspace(0,end,100*end)
+    dt=t[1]-t[0]
+
+    ai,po,pi,hi=np.zeros(t.size),np.zeros(t.size),np.zeros(t.size),np.zeros(t.size)
+    ai[0],pi[0],hi[0]=a0,p0,h0
+    u=np.zeros((t.size,4))
+    u[0]=np.array([ai[0],po[0],pi[0],hi[0]])
+    V=VW/VT
+
+    A=np.array([[1+dt*(a_e+r1),0,0,0],[0,(1+dt*p_i),-dt*p_e,0],[-r1*dt,-dt*p_i,1+dt*p_e+dt*r2,0],[0,0,-dt*r2,1+dt*km3]])
+    for k in range(t.size-1):
+        u[k+1]=(np.linalg.inv(A)@(u[k].reshape(-1,1)+np.array([dt*a_i*ao,0,0,0]).reshape(-1,1))).reshape(1,4)
+    return t,u
+```
+
+## Steady State Simulation
+
+```{python}
+def steady_state(ao=1,a_i=1,a_e=0.1,p_i=1,p_e=0.1,r1=1,r2=1,km3=0.1,VW=1e-3,VT=4e-3):
+    t,u=model_sim(end=24,ao=ao,a_i=a_i,a_e=a_e,p_i=p_i,p_e=p_e,r1=r1,r2=r2,km3=km3,VW=VW,VT=VT,a0=0.1,p0=0.1,h0=0.1)
+    ai_tts=-1
+    po_tts=-1
+    pi_tts=-1
+    hi_tts=-1
+    ai_ss=a_i*ao/(a_e+r1)
+    po_ss=r1*a_i*p_e*ao/(r2*p_i*(a_e+r1))
+    pi_ss=r1*a_i*ao/(r2*(a_e+r1))
+    hi_ss=r1*a_i*p_e*ao/(r2*km3*p_i*(a_e+r1))
+    for k in range(t.size):
+        if np.abs(u[k,0]-ai_ss)<1e-6:
+            ai_tts=t[k]
+            break
+    for k in range(t.size):
+        if np.abs(u[k,1]-po_ss)<1e-6:
+            po_tts=t[k]
+            break
+    for k in range(t.size):
+        if np.abs(u[k,2]-pi_ss)<1e-6:
+            pi_tts=t[k]
+            break
+    for k in range(t.size):
+        if np.abs(u[k,3]-hi_ss)<1e-6:
+            hi_tts=t[k]
+            break
+    return ai_ss,ai_tts,po_ss,po_tts,pi_ss,pi_tts,hi_ss,hi_tts
+```
+
+```{python}
+t,u=model_sim(end=24)
+```
+
+```{python}
+ai_ss,ai_tts,po_ss,po_tts,pi_ss,pi_tts,hi_ss,hi_tts=steady_state()
+```
+
+```{python}
+plt.plot(t,u[:,0],color='orange')
+plt.axhline(ai_ss,color='orange',linestyle='--')
+plt.axvline(ai_tts,color='orange',linestyle='--')
+
+plt.plot(t,u[:,2],color='blue')
+plt.axhline(pi_ss,color='blue',linestyle='--')
+plt.axvline(pi_tts,color='blue',linestyle='--')
+
+plt.plot(t,u[:,3],color='red')
+plt.axhline(hi_ss,color='red',linestyle='--')
+plt.axvline(hi_tts,color='red',linestyle='--')
+
+plt.xlim(0,24)
+plt.show()
+```
+
+```{python}
+ais,aes,pis,pes,r1s,r2s,km3s=np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250),np.logspace(-2,1,250)
+```
+
+```{python}
+ai_ai_ss,ai_ai_tts=np.zeros_like(ais),np.zeros_like(ais)
+ai_po_ss,ai_po_tts=np.zeros_like(ais),np.zeros_like(ais)
+ai_pi_ss,ai_pi_tts=np.zeros_like(ais),np.zeros_like(ais)
+ai_hi_ss,ai_hi_tts=np.zeros_like(ais),np.zeros_like(ais)
+for i in tqdm(range(ais.size)):
+    ai_ss,ai_tts,po_ss,po_tts,pi_ss,pi_tts,hi_ss,hi_tts=steady_state(a_i=ais[i])
+    ai_ai_ss[i],ai_ai_tts[i]=ai_ss,ai_tts
+    ai_po_ss[i],ai_po_tts[i]=po_ss,po_tts
+    ai_pi_ss[i],ai_pi_tts[i]=pi_ss,pi_tts
+    ai_hi_ss[i],ai_hi_tts[i]=hi_ss,hi_tts
+```
+
+```{python}
+ae_ai_ss,ae_ai_tts=np.zeros_like(aes),np.zeros_like(aes)
+ae_po_ss,ae_po_tts=np.zeros_like(aes),np.zeros_like(aes)
+ae_pi_ss,ae_pi_tts=np.zeros_like(aes),np.zeros_like(aes)
+ae_hi_ss,ae_hi_tts=np.zeros_like(aes),np.zeros_like(aes)
+for i in tqdm(range(aes.size)):
+    ai_ss,ai_tts,po_ss,po_tts,pi_ss,pi_tts,hi_ss,hi_tts=steady_state(a_e=aes[i])
+    ae_ai_ss[i],ae_ai_tts[i]=ai_ss,ai_tts
+    ae_po_ss[i],ae_po_tts[i]=po_ss,po_tts
+    ae_pi_ss[i],ae_pi_tts[i]=pi_ss,pi_tts
+    ae_hi_ss[i],ae_hi_tts[i]=hi_ss,hi_tts
+```
+
+```{python}
+pi_ai_ss,pi_ai_tts=np.zeros_like(pis),np.zeros_like(pis)
+pi_po_ss,pi_po_tts=np.zeros_like(pis),np.zeros_like(pis)
+pi_pi_ss,pi_pi_tts=np.zeros_like(pis),np.zeros_like(pis)
+pi_hi_ss,pi_hi_tts=np.zeros_like(pis),np.zeros_like(pis)
+for i in tqdm(range(pis.size)):
+    ai_ss,ai_tts,po_ss,po_tts,pi_ss,pi_tts,hi_ss,hi_tts=steady_state(p_i=pis[i])
+    pi_ai_ss[i],pi_ai_tts[i]=ai_ss,ai_tts
+    pi_po_ss[i],pi_po_tts[i]=po_ss,po_tts
+    pi_pi_ss[i],pi_pi_tts[i]=pi_ss,pi_tts
+    pi_hi_ss[i],pi_hi_tts[i]=hi_ss,hi_tts
+```
+
+```{python}
+pe_ai_ss,pe_ai_tts=np.zeros_like(pes),np.zeros_like(pes)
+pe_po_ss,pe_po_tts=np.zeros_like(pes),np.zeros_like(pes)
+pe_pi_ss,pe_pi_tts=np.zeros_like(pes),np.zeros_like(pes)
+pe_hi_ss,pe_hi_tts=np.zeros_like(pes),np.zeros_like(pes)
+for i in tqdm(range(pes.size)):
+    ai_ss,ai_tts,po_ss,po_tts,pi_ss,pi_tts,hi_ss,hi_tts=steady_state(p_e=pes[i])
+    pe_ai_ss[i],pe_ai_tts[i]=ai_ss,ai_tts
+    pe_po_ss[i],pe_po_tts[i]=po_ss,po_tts
+    pe_pi_ss[i],pe_pi_tts[i]=pi_ss,pi_tts
+    pe_hi_ss[i],pe_hi_tts[i]=hi_ss,hi_tts
+```
+
+```{python}
+r1_ai_ss,r1_ai_tts=np.zeros_like(r1s),np.zeros_like(r1s)
+r1_po_ss,r1_po_tts=np.zeros_like(r1s),np.zeros_like(r1s)
+r1_pi_ss,r1_pi_tts=np.zeros_like(r1s),np.zeros_like(r1s)
+r1_hi_ss,r1_hi_tts=np.zeros_like(r1s),np.zeros_like(r1s)
+for i in tqdm(range(r1s.size)):
+    ai_ss,ai_tts,po_ss,po_tts,pi_ss,pi_tts,hi_ss,hi_tts=steady_state(r1=r1s[i])
+    r1_ai_ss[i],r1_ai_tts[i]=ai_ss,ai_tts
+    r1_po_ss[i],r1_po_tts[i]=po_ss,po_tts
+    r1_pi_ss[i],r1_pi_tts[i]=pi_ss,pi_tts
+    r1_hi_ss[i],r1_hi_tts[i]=hi_ss,hi_tts
+```
+
+```{python}
+r2_ai_ss,r2_ai_tts=np.zeros_like(r2s),np.zeros_like(r2s)
+r2_po_ss,r2_po_tts=np.zeros_like(r2s),np.zeros_like(r2s)
+r2_pi_ss,r2_pi_tts=np.zeros_like(r2s),np.zeros_like(r2s)
+r2_hi_ss,r2_hi_tts=np.zeros_like(r2s),np.zeros_like(r2s)
+for i in tqdm(range(r2s.size)):
+    ai_ss,ai_tts,po_ss,po_tts,pi_ss,pi_tts,hi_ss,hi_tts=steady_state(r2=r2s[i])
+    r2_ai_ss[i],r2_ai_tts[i]=ai_ss,ai_tts
+    r2_po_ss[i],r2_po_tts[i]=po_ss,po_tts
+    r2_pi_ss[i],r2_pi_tts[i]=pi_ss,pi_tts
+    r2_hi_ss[i],r2_hi_tts[i]=hi_ss,hi_tts
+```
+
+```{python}
+km3_ai_ss,km3_ai_tts=np.zeros_like(km3s),np.zeros_like(km3s)
+km3_po_ss,km3_po_tts=np.zeros_like(km3s),np.zeros_like(km3s)
+km3_pi_ss,km3_pi_tts=np.zeros_like(km3s),np.zeros_like(km3s)
+km3_hi_ss,km3_hi_tts=np.zeros_like(km3s),np.zeros_like(km3s)
+for i in tqdm(range(km3s.size)):
+    ai_ss,ai_tts,po_ss,po_tts,pi_ss,pi_tts,hi_ss,hi_tts=steady_state(km3=km3s[i])
+    km3_ai_ss[i],km3_ai_tts[i]=ai_ss,ai_tts
+    km3_po_ss[i],km3_po_tts[i]=po_ss,po_tts
+    km3_pi_ss[i],km3_pi_tts[i]=pi_ss,pi_tts
+    km3_hi_ss[i],km3_hi_tts[i]=hi_ss,hi_tts
+```
+
+```{python}
+fig,axs=plt.subplots()
+axs.semilogx(ais,ai_pi_ss,color='red')
+#axs_pi.plot(ais,ai_pi_tts,linestyle='--',color='b')
+axs.set_xlabel(r'$\alpha_{A_i}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(aes,ae_pi_ss,color='orange')
+axs.set_xlabel(r'$\alpha_{A_e}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(pis,pi_pi_ss,color='gold')
+axs.set_xlabel(r'$\alpha_{P_i}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(pes,pe_pi_ss,color='green')
+axs.set_xlabel(r'$\alpha_{P_e}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(r1s,r1_pi_ss,color='dodgerblue')
+axs.set_xlabel(r'$r_1$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(r2s,r2_pi_ss,color='blue')
+axs.set_xlabel(r'$r_2$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+
+fig,axs=plt.subplots()
+axs.semilogx(km3s,km3_pi_ss,color='purple')
+axs.set_xlabel(r'$k_{-3}$',fontsize=15)
+axs.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+```
+
+## TTF Simulation
+
+```{python}
+def time_to_fluorescence(thresh=0.5,ao=1,a_i=1,a_e=0.1,p_i=1,p_e=0.1,r1=1,r2=1,km3=0.1,VW=1e-3,VT=4e-3):
+    t,u=model_sim(end=24,ao=ao,a_i=a_i,a_e=a_e,p_i=p_i,p_e=p_e,r1=r1,r2=r2,km3=km3,VW=VW,VT=VT,a0=0.1,p0=0.1,h0=0.1)
+    pi_ttf=-1
+    for k in range(t.size):
+        if u[k,2]>thresh:
+            pi_ttf=t[k]
+            break
+    return pi_ttf
+```
+
+```{python}
+t,u=model_sim(end=24)
+```
+
+```{python}
+pi_ttf=time_to_fluorescence(thresh=0.7)
+```
+
+```{python}
+plt.axhspan(0.7,1,color='magenta',alpha=0.3)
+plt.axhline(0.7,color='magenta',linestyle='--')
+plt.plot(t,u[:,2],color='blue')
+plt.axvline(pi_ttf,0,0.7,color='blue',linestyle='--')
+plt.ylabel('Fluorescence',fontsize=15)
+plt.xlabel('t (Hours)',fontsize=15)
+
+plt.yticks(ticks=[0.95],labels=['Visible\nFluorescence'],rotation=90)
+plt.xticks(ticks=[0,pi_ttf,5,10,15,20,24],labels=[0,'TTF',5,10,15,20,24])
+
+plt.xlim(0,24)
+plt.ylim(0,1)
+plt.show()
+```
+
+```{python}
+ais_ttf=np.zeros_like(ais)
+for i in tqdm(range(ais.size)):
+    pi_ttf=time_to_fluorescence(a_i=ais[i])
+    ais_ttf[i]=pi_ttf
+```
+
+```{python}
+aes_ttf=np.zeros_like(aes)
+for i in tqdm(range(aes.size)):
+    pi_ttf=time_to_fluorescence(a_e=aes[i])
+    aes_ttf[i]=pi_ttf
+```
+
+```{python}
+pis_ttf=np.zeros_like(pis)
+for i in tqdm(range(pis.size)):
+    pi_ttf=time_to_fluorescence(p_i=pis[i])
+    pis_ttf[i]=pi_ttf
+```
+
+```{python}
+pes_ttf=np.zeros_like(pes)
+for i in tqdm(range(pes.size)):
+    pi_ttf=time_to_fluorescence(p_e=pes[i])
+    pes_ttf[i]=pi_ttf
+```
+
+```{python}
+r1s_ttf=np.zeros_like(r1s)
+for i in tqdm(range(r1s.size)):
+    pi_ttf=time_to_fluorescence(r1=r1s[i])
+    r1s_ttf[i]=pi_ttf
+```
+
+```{python}
+r2s_ttf=np.zeros_like(r2s)
+for i in tqdm(range(r2s.size)):
+    pi_ttf=time_to_fluorescence(r2=r2s[i])
+    r2s_ttf[i]=pi_ttf
+```
+
+```{python}
+km3s_ttf=np.zeros_like(km3s)
+for i in tqdm(range(km3s.size)):
+    pi_ttf=time_to_fluorescence(km3=km3s[i])
+    km3s_ttf[i]=pi_ttf
+```
+
+```{python}
+fig,axs=plt.subplot_mosaic([['ai','ae'],['pi','pe'],['r1','r2'],['km3','sim']],layout='constrained',figsize=(10,12))
+
+axs_ai=axs['ai'].twinx()
+axs['ai'].semilogx(ais,ai_pi_ss,color='red')
+axs_ai.plot(ais[np.argwhere(ais_ttf==-1)[-1].item()+1:],ais_ttf[np.argwhere(ais_ttf==-1)[-1].item()+1:],color='red',linestyle='--')
+axs_ai.axvspan(ais[np.argwhere(ais_ttf==-1)[0]][0],ais[np.argwhere(ais_ttf==-1)[-1]][0],alpha=0.5,color='grey')
+
+axs_ae=axs['ae'].twinx()
+axs['ae'].semilogx(aes,ae_pi_ss,color='orange')
+axs_ae.plot(aes[:np.argwhere(aes_ttf==-1)[0][0]],aes_ttf[:np.argwhere(aes_ttf==-1)[0][0]],color='orange',linestyle='--')
+axs_ae.axvspan(aes[np.argwhere(aes_ttf==-1)[0]][0],aes[np.argwhere(aes_ttf==-1)[-1]][0],alpha=0.5,color='grey')
+
+axs_pi=axs['pi'].twinx()
+axs['pi'].semilogx(pis,pi_pi_ss,color='gold')
+axs_pi.plot(pis,pis_ttf,color='gold',linestyle='--')
+axs_pi.set_ylim(0,2)
+
+axs_pe=axs['pe'].twinx()
+axs['pe'].semilogx(pes,pe_pi_ss,color='green')
+axs_pe.plot(pes,pes_ttf,color='green',linestyle='--')
+
+axs_r1=axs['r1'].twinx()
+axs['r1'].semilogx(r1s,r1_pi_ss,color='dodgerblue')
+axs_r1.plot(r1s[np.argwhere(r1s_ttf==-1)[-1].item()+1:],r1s_ttf[np.argwhere(r1s_ttf==-1)[-1].item()+1:],color='dodgerblue',linestyle='--')
+axs_r1.axvspan(r1s[np.argwhere(r1s_ttf==-1)[0].item()],r1s[np.argwhere(r1s_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+
+axs_r2=axs['r2'].twinx()
+axs['r2'].semilogx(r2s,r2_pi_ss,color='blue')
+axs_r2.plot(r2s[:np.argwhere(r2s_ttf==-1)[0].item()],r2s_ttf[:np.argwhere(r2s_ttf==-1)[0].item()],color='blue',linestyle='--')
+axs_r2.axvspan(r2s[np.argwhere(r2s_ttf==-1)[0].item()],r2s[np.argwhere(r2s_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+
+axs_km3=axs['km3'].twinx()
+axs['km3'].semilogx(km3s,km3_pi_ss,color='purple')
+axs_km3.plot(km3s,km3s_ttf,color='purple',linestyle='--')
+
+axs['sim'].set_axis_off()
+
+axs['ai'].set(xticks=[])
+axs['ae'].set(xticks=[])
+axs['pi'].set(xticks=[])
+axs['pe'].set(xticks=[])
+axs['r1'].set(xticks=[])
+
+
+axs['ai'].set_xlabel(r'$\alpha_{A_i}$',fontsize=20)
+axs['ae'].set_xlabel(r'$\alpha_{A_e}$',fontsize=20)
+axs['pi'].set_xlabel(r'$\alpha_{P_i}$',fontsize=20)
+axs['pe'].set_xlabel(r'$\alpha_{P_e}$',fontsize=20)
+axs['r1'].set_xlabel(r'$r_1$',fontsize=20)
+axs['r2'].set_xlabel(r'$r_2$',fontsize=20)
+axs['km3'].set_xlabel(r'$k_{-3}$',fontsize=20)
+
+axs['ai'].set_ylabel('Fluorescence\nsteady state',fontsize=20)
+axs['pi'].set_ylabel('Fluorescence\nsteady state',fontsize=20)
+axs['r1'].set_ylabel('Fluorescence\nsteady state',fontsize=20)
+axs['km3'].set_ylabel('Fluorescence\nsteady state',fontsize=20)
+
+axs_ae.set_ylabel('TTF',fontsize=20)
+axs_pe.set_ylabel('TTF',fontsize=20) 
+axs_r2.set_ylabel('TTF',fontsize=20)
+
+custom_lines=[Line2D([0],[0],color='k',label='Fluorescence \nSteady State'),Line2D([0],[0],color='k',linestyle='--',label='Time to Visible\nFluorescence'),Patch(facecolor='grey',alpha=0.5,label='No Visible\nFluorescence')]
+axs['sim'].legend(handles=custom_lines,bbox_to_anchor=(0.85,0.9),fontsize=15)
+
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots()
+ax1=axs.twinx()
+ax1.plot(ais,ai_pi_ss,color='red')
+axs.axvspan(ais[np.argwhere(ais_ttf==-1)[0]][0],ais[np.argwhere(ais_ttf==-1)[-1]][0],alpha=0.5,color='grey')
+axs.semilogx(ais[np.argwhere(ais_ttf==-1)[-1].item()+1:],ais_ttf[np.argwhere(ais_ttf==-1)[-1].item()+1:],color='red',linestyle='--')
+#axs_pi.plot(ais,ai_pi_tts,linestyle='--',color='b')
+axs.set_xlabel(r'$\alpha_{A_i}$',fontsize=15)
+axs.set_ylabel('Time to Visible Fluorescence',fontsize=15)
+ax1.set_ylabel('Fluorescence Steady State',fontsize=15)
+
+axs.axvline(0.05)
+axs.axvline(1)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots()
+ax1=axs.twinx()
+ax1.plot(aes,ae_pi_ss,color='orange')
+axs.axvspan(aes[np.argwhere(aes_ttf==-1)[0]][0],aes[np.argwhere(aes_ttf==-1)[-1]][0],alpha=0.5,color='grey')
+axs.semilogx(aes[:np.argwhere(aes_ttf==-1)[0][0]],aes_ttf[:np.argwhere(aes_ttf==-1)[0][0]],color='orange',linestyle='--')
+
+axs.set_xlabel(r'$\alpha_{A_e}$',fontsize=15)
+axs.set_ylabel('Time to Visible Fluorescence',fontsize=15)
+ax1.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots()
+ax1=axs.twinx()
+ax1.plot(pis,pi_pi_ss,color='gold')
+axs.semilogx(pis,pis_ttf,color='gold',linestyle='--')
+axs.set_xlabel(r'$\alpha_{P_i}$',fontsize=15)
+axs.set_ylabel('Time to Visible Fluorescence',fontsize=15)
+ax1.set_ylabel('Fluorescence Steady State', fontsize=15)
+axs.set_ylim(0,5)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots()
+ax1=axs.twinx()
+ax1.plot(pes,pe_pi_ss,color='green')
+axs.semilogx(pes,pes_ttf,color='green',linestyle='--')
+axs.set_xlabel(r'$\alpha_{P_e}$',fontsize=15)
+axs.set_ylabel('Time to Visible Fluorescence',fontsize=15)
+ax1.set_ylabel('Fluorescence Steady State',fontsize=15)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots()
+axs.axvspan(r1s[np.argwhere(r1s_ttf==-1)[0].item()],r1s[np.argwhere(r1s_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs.semilogx(r1s[np.argwhere(r1s_ttf==-1)[-1].item()+1:],r1s_ttf[np.argwhere(r1s_ttf==-1)[-1].item()+1:],color='dodgerblue')
+axs.set_xlabel(r'$r_1$',fontsize=15)
+axs.set_ylabel('Time to Visible Fluorescence',fontsize=15)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots()
+axs.axvspan(r2s[np.argwhere(r2s_ttf==-1)[0].item()],r2s[np.argwhere(r2s_ttf==-1)[-1].item()],color='grey',alpha=0.5)
+axs.semilogx(r2s[:np.argwhere(r2s_ttf==-1)[0].item()],r2s_ttf[:np.argwhere(r2s_ttf==-1)[0].item()],color='blue')
+axs.set_xlabel(r'$r_2$',fontsize=15)
+axs.set_ylabel('Time to Visible Fluorescence',fontsize=15)
+plt.show()
+```
+
+```{python}
+fig,axs=plt.subplots()
+axs.semilogx(km3s,km3s_ttf,color='purple')
+axs.set_xlabel(r'$k_{-3}$',fontsize=15)
+axs.set_ylabel('Time to Visible Fluorescence',fontsize=15)
+plt.show()
+```
+
+## Example figures
+
+```{python}
+t,u_ai_1=model_sim(end=24,a_i=1)
+t,u_ai_2=model_sim(end=24,a_i=5)
+```
+
+```{python}
+plt.plot(t,u_ai_1[:,2],color='red')
+plt.plot(t,u_ai_2[:,2],color='red',linestyle='--')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
+
+```{python}
+t,u_ae_1=model_sim(end=24,a_e=0.1)
+t,u_ae_2=model_sim(end=24,a_e=2)
+```
+
+```{python}
+plt.plot(t,u_ae_1[:,2],color='orange')
+plt.plot(t,u_ae_2[:,2],color='orange',linestyle='--')
+plt.xlabel('t (Hours)')
+plt.ylabel('Fluorescence')
+plt.show()
+```
